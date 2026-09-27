@@ -50,12 +50,15 @@ impl EnergyVad {
     /// noise floor. A fixed RMS level depends on input gain, and at low gain
     /// real speech never reached it, so short dictations were discarded.
     /// Only ever lowers the configured threshold, so a loud mic behaves as
-    /// before, and never below the most sensitive setting.
+    /// before, and by at most a factor of `MAX_ADAPTIVE_DROP`, so a high
+    /// setting chosen to ignore quiet background speech still means
+    /// something in a quiet room. Never below the most sensitive setting.
     fn effective_threshold(&self, frame_rms: &[f32]) -> f32 {
         let mut sorted = frame_rms.to_vec();
         sorted.sort_by(|a, b| a.total_cmp(b));
         let floor = sorted[((sorted.len() - 1) as f32 * NOISE_FLOOR_PERCENTILE) as usize];
         (floor * NOISE_FLOOR_MULTIPLE)
+            .max(self.threshold / MAX_ADAPTIVE_DROP)
             .max(MIN_ENERGY_THRESHOLD)
             .min(self.threshold)
     }
@@ -68,6 +71,8 @@ const NOISE_FLOOR_MULTIPLE: f32 = 3.0;
 const NOISE_FLOOR_PERCENTILE: f32 = 0.10;
 /// The lowest threshold ever used, equal to the most sensitive setting.
 const MIN_ENERGY_THRESHOLD: f32 = 0.001;
+/// The adaptive bar goes at most one decade below the configured threshold.
+const MAX_ADAPTIVE_DROP: f32 = 10.0;
 /// Consecutive loud frames (60ms) needed before they count as speech. A lower
 /// adaptive threshold would otherwise let keyboard clicks and pops, one or two
 /// 20ms frames each, add up to the minimum speech duration.
@@ -298,6 +303,38 @@ mod tests {
             .detect(&audio)
             .unwrap();
         assert!(result.has_speech, "{result:?}");
+    }
+
+    #[test]
+    fn a_high_threshold_still_rejects_quiet_speech_in_a_quiet_room() {
+        // threshold = 0.9 maps to RMS ~0.063. Someone who set it to ignore
+        // quiet background speech must not have it dropped to the room's
+        // noise floor: the adaptive bar stops a decade below, at ~0.0063,
+        // above these RMS ~0.004 bursts.
+        let mut audio = noise(32000, 0.0005, 7);
+        add_burst(&mut audio, 6400, 4800, 0.006);
+        add_burst(&mut audio, 17600, 4800, 0.006);
+        let config = VadConfig {
+            threshold: 0.9,
+            ..VadConfig::default()
+        };
+        let result = EnergyVad::new(&config).detect(&audio).unwrap();
+        assert!(!result.has_speech, "{result:?}");
+    }
+
+    #[test]
+    fn the_adaptive_bar_stays_within_a_decade_of_the_setting() {
+        let config = VadConfig {
+            threshold: 0.9,
+            ..VadConfig::default()
+        };
+        let vad = EnergyVad::new(&config);
+        let quiet_room = vec![0.0003f32; 50];
+        let bar = vad.effective_threshold(&quiet_room);
+        assert!(
+            (bar - vad.threshold / MAX_ADAPTIVE_DROP).abs() < 1e-6,
+            "{bar}"
+        );
     }
 
     #[test]
