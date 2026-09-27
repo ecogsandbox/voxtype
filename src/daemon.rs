@@ -809,8 +809,11 @@ async fn write_transcription_to_file(
         }
     }
 
-    // Ensure text ends with newline
-    let output_text = if text.ends_with('\n') {
+    // An empty transcript (post-processing returned nothing with
+    // fallback_on_empty off) writes nothing: overwrite still replaces the
+    // previous transcript, with an empty file, so a reader can't take the old
+    // text for this result, and append adds no blank line.
+    let output_text = if text.is_empty() || text.ends_with('\n') {
         text.to_string()
     } else {
         format!("{}\n", text)
@@ -830,6 +833,7 @@ async fn write_transcription_to_file(
                 return Err(e);
             }
         }
+        FileMode::Append if output_text.is_empty() => {}
         FileMode::Append => {
             let mut file = tokio::fs::OpenOptions::new()
                 .create(true)
@@ -837,6 +841,10 @@ async fn write_transcription_to_file(
                 .open(path)
                 .await?;
             file.write_all(output_text.as_bytes()).await?;
+            // tokio completes the write on a background thread; without the
+            // flush a reader right after this returns can still see the old
+            // file, and dropping the handle doesn't wait for it.
+            file.flush().await?;
         }
     }
 
@@ -3400,10 +3408,12 @@ impl Daemon {
                                     FileMode::Append => "appended",
                                 };
                                 tracing::info!("{} transcription to {:?}", mode_str, output_path);
-                                write_result_sidecar(
-                                    &output_path,
-                                    &TranscriptOutcome::ok(final_text.chars().count()),
-                                );
+                                let outcome = if final_text.is_empty() {
+                                    TranscriptOutcome::empty()
+                                } else {
+                                    TranscriptOutcome::ok(final_text.chars().count())
+                                };
+                                write_result_sidecar(&output_path, &outcome);
                                 self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
                             FileDelivery::FellBack(err) => {
@@ -5413,6 +5423,47 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn an_empty_transcript_leaves_no_newline_behind() {
+        let dir = TempDir::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Overwrite still replaces the previous transcript, with nothing.
+        let overwrite = dir.path().join("overwrite.txt");
+        fs::write(&overwrite, "previous transcript\n").unwrap();
+        runtime
+            .block_on(write_transcription_to_file(
+                &overwrite,
+                "",
+                &FileMode::Overwrite,
+            ))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&overwrite).unwrap(), "");
+
+        // Append adds nothing and doesn't create a missing file.
+        let append = dir.path().join("append.txt");
+        fs::write(&append, "first\n").unwrap();
+        runtime
+            .block_on(write_transcription_to_file(&append, "", &FileMode::Append))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&append).unwrap(), "first\n");
+        let missing = dir.path().join("missing.txt");
+        runtime
+            .block_on(write_transcription_to_file(&missing, "", &FileMode::Append))
+            .unwrap();
+        assert!(!missing.exists());
+
+        // Non-empty text keeps its trailing newline.
+        runtime
+            .block_on(write_transcription_to_file(
+                &append,
+                "second",
+                &FileMode::Append,
+            ))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&append).unwrap(), "first\nsecond\n");
     }
 
     #[test]
