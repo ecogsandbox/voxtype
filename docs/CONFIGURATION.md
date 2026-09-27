@@ -3117,7 +3117,7 @@ Speech detection sensitivity threshold. Lower values are more sensitive (detect 
 - `0.5` - Balanced, filters silence while allowing normal speech (default)
 - `1.0` - Aggressive, requires loud clear speech
 
-With the energy backend (`backend = "energy"`, or `"auto"` with a non-Whisper engine), this is an upper bound rather than a fixed level. Each recording's own background noise is measured, and when speech three times louder than that noise (about 10 dB) is below the configured level, the lower bar is used. A quiet or low-gain microphone therefore still detects speech, while a loud one behaves exactly as the setting says. Only sustained sound counts: runs of at least 60 ms, so keyboard clicks don't pass as speech.
+With the energy backend (`backend = "energy"`, or `"auto"` with a non-Whisper engine), this is an upper bound rather than a fixed level. Each recording's own background noise is measured, and when speech three times louder than that noise (about 10 dB) is below the configured level, the lower bar is used, down to at most a tenth of the configured level. A quiet or low-gain microphone therefore still detects speech, a loud one behaves exactly as the setting says, and a high setting chosen to ignore quiet background speech still does so in a quiet room. Only sustained sound counts: runs of at least 60 ms, so keyboard clicks don't pass as speech.
 
 **Example:**
 ```toml

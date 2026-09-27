@@ -138,8 +138,9 @@ pub fn tail_start(boundaries: &[usize], chunks_sent: usize) -> usize {
 /// Join transcription results from multiple chunks in chunk order.
 ///
 /// Chunks are disjoint, so every word belongs to exactly one chunk and the
-/// texts are simply concatenated. Empty chunks (silence, failures) are
-/// skipped without leaving a double space.
+/// texts are concatenated, with punctuation the engine added only because of
+/// the cut smoothed away (see `smooth_boundary`). Empty chunks (silence,
+/// failures) are skipped without leaving a double space.
 ///
 /// # Arguments
 /// * `results` - Vector of chunk results (may be in any order)
@@ -148,12 +149,69 @@ pub fn tail_start(boundaries: &[usize], chunks_sent: usize) -> usize {
 /// Combined transcription text
 pub fn combine_chunk_results(mut results: Vec<ChunkResult>) -> String {
     results.sort_by_key(|r| r.chunk_index);
-    results
+    let mut texts: Vec<String> = results
         .iter()
-        .map(|r| r.text.trim())
+        .map(|r| r.text.trim().to_string())
         .filter(|t| !t.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    for i in 1..texts.len() {
+        let (before, after) = texts.split_at_mut(i);
+        smooth_boundary(&mut before[i - 1], &mut after[0]);
+    }
+    texts.join(" ")
+}
+
+/// Common words an engine capitalizes only because it saw them at the start
+/// of a chunk. Proper nouns and acronyms can't be told apart from these by
+/// casing, so anything not listed is left alone.
+const SENTENCE_START_WORDS: &[&str] = &[
+    "The", "A", "An", "And", "But", "Or", "So", "To", "Of", "In", "On", "At", "For", "With", "As",
+    "It", "Is", "Was", "Are", "Be", "That", "This", "Then", "There", "We", "You", "They", "He",
+    "She", "If", "Not", "What", "Which", "Who", "When", "Where", "How",
+];
+
+/// Abbreviations whose trailing period is part of the word.
+const ABBREVIATIONS: &[&str] = &[
+    "Mr.", "Mrs.", "Ms.", "Dr.", "St.", "Jr.", "Sr.", "vs.", "etc.",
+];
+
+/// Undo punctuation an engine added only because a chunk was cut mid-sentence.
+///
+/// Each chunk is transcribed on its own, so the engine may end it with a
+/// period ("the chunk.") or open the next with sentence casing ("The next")
+/// even though the speaker never paused. Conservative on purpose: a period
+/// goes only when the next chunk continues in lowercase, a capital goes only
+/// on a listed function word after an unpunctuated end, and "?", "!",
+/// ellipses, abbreviations, "I", acronyms and proper nouns are never touched.
+fn smooth_boundary(prev: &mut String, next: &mut String) {
+    let Some(first_word) = next.split_whitespace().next() else {
+        return;
+    };
+    let Some(last_word) = prev.split_whitespace().last() else {
+        return;
+    };
+    let next_starts_lowercase = first_word.chars().next().is_some_and(|c| c.is_lowercase());
+
+    // "the chunk." + "boundaries are..." -> "the chunk boundaries are..."
+    let stray_period = last_word.ends_with('.')
+        && !last_word.ends_with("..")
+        // e.g. / U.S.: an internal period means the word owns its period.
+        && !last_word[..last_word.len() - 1].contains('.')
+        && !ABBREVIATIONS.contains(&last_word);
+    if stray_period && next_starts_lowercase {
+        prev.pop();
+        return;
+    }
+
+    // "we moved to" + "The new office" -> "we moved to the new office"
+    let prev_unpunctuated = prev.chars().last().is_some_and(|c| c.is_alphanumeric());
+    let bare_first = first_word.trim_end_matches(|c: char| !c.is_alphanumeric());
+    if prev_unpunctuated && SENTENCE_START_WORDS.contains(&bare_first) {
+        let mut chars = next.chars();
+        if let Some(c) = chars.next() {
+            *next = c.to_lowercase().chain(chars).collect();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -341,5 +399,45 @@ mod tests {
             result("two", 3),
         ];
         assert_eq!(combine_chunk_results(results), "one two");
+    }
+
+    fn joined(a: &str, b: &str) -> String {
+        combine_chunk_results(vec![result(a, 0), result(b, 1)])
+    }
+
+    #[test]
+    fn a_period_added_at_a_mid_sentence_cut_is_dropped() {
+        // Seen in the rc2 smoke run: "chunk. boundaries".
+        assert_eq!(
+            joined("left no artifacts at the chunk.", "boundaries this time"),
+            "left no artifacts at the chunk boundaries this time"
+        );
+    }
+
+    #[test]
+    fn sentence_casing_on_a_function_word_after_a_cut_is_lowered() {
+        assert_eq!(
+            joined("we moved everything to", "The new office"),
+            "we moved everything to the new office"
+        );
+    }
+
+    #[test]
+    fn real_boundaries_and_names_are_left_alone() {
+        let untouched = [
+            ("It works.", "The next part starts here"),
+            ("Did it work?", "yes it did"),
+            ("Wow!", "that was fast"),
+            ("Wait...", "no, go back"),
+            ("I spoke to Mr.", "smith about it"),
+            ("try something, e.g.", "this one"),
+            ("and then", "I said no"),
+            ("we flew to", "Paris on Monday"),
+            ("paste the", "API key here"),
+            ("I think that", "that is fine"),
+        ];
+        for (a, b) in untouched {
+            assert_eq!(joined(a, b), format!("{a} {b}"), "{a:?} + {b:?}");
+        }
     }
 }
