@@ -103,6 +103,15 @@ pub fn download_arg(engine: &str, model: &str) -> Option<String> {
     }
 }
 
+/// The command that fetches `model` for `engine`, for missing-model errors.
+/// ONNX and OpenVINO models are served from models.voxtype.io with
+/// verified manifests, so errors point here rather than at an upstream
+/// HuggingFace repo whose layout voxtype doesn't control.
+pub fn download_command(engine: &str, model: &str) -> String {
+    let arg = download_arg(engine, model).unwrap_or_else(|| model.to_string());
+    format!("voxtype setup --download --model {arg}")
+}
+
 /// On-disk location of a model: a single `ggml-<name>.bin` file for whisper,
 /// a directory for every ONNX engine.
 fn model_path(models_dir: &Path, engine: &str, model: &str) -> std::path::PathBuf {
