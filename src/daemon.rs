@@ -14,6 +14,7 @@ use crate::hotkey::{self, HotkeyEvent};
 use crate::hotkey_macos::{self as hotkey, HotkeyEvent};
 use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
 use crate::model_catalog;
+use crate::model_catalog::override_config;
 use crate::model_manager::ModelManager;
 use crate::notification::{self, Lifetime};
 use crate::output;
@@ -931,33 +932,6 @@ fn read_model_override() -> Option<String> {
 fn cleanup_model_override() {
     let override_file = Config::runtime_dir().join("model_override");
     let _ = std::fs::remove_file(&override_file);
-}
-
-/// Config for a transcriber serving a `--model` override: the user's
-/// settings with `engine` and its model swapped in. Streaming is switched
-/// off because override recordings take the batch path.
-fn override_config(
-    base: &Config,
-    engine: crate::config::TranscriptionEngine,
-    model: &str,
-) -> Config {
-    let mut config = base.clone();
-    config.set_model_for(engine, model);
-    config.whisper.streaming = false;
-    if let Some(parakeet) = config.parakeet.as_mut() {
-        parakeet.streaming = false;
-    }
-    if let Some(openvino) = config.openvino.as_mut() {
-        openvino.streaming = false;
-    }
-    if engine == crate::config::TranscriptionEngine::Whisper
-        && config.whisper.effective_mode() == crate::config::WhisperMode::Remote
-    {
-        // The remote backend sends `remote_model`, not `model`, the same
-        // substitution the Whisper model manager makes for its overrides.
-        config.whisper.remote_model = Some(model.to_string());
-    }
-    config
 }
 
 /// Result type for transcription task
