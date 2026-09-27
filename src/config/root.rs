@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// The `--config` file, when one was given. See [`Config::set_path_override`].
+static CONFIG_PATH_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn default_state_file() -> Option<String> {
     Some("auto".to_string())
 }
@@ -212,9 +215,21 @@ impl Config {
     /// System-wide config path used as a fallback when no user config exists.
     pub const SYSTEM_PATH: &'static str = "/etc/voxtype/config.toml";
 
-    /// Default user config file path: `<config_dir>/config.toml`.
+    /// Default user config file path: `<config_dir>/config.toml`, or the file
+    /// given with `--config` once [`Config::set_path_override`] has run.
     pub fn default_path() -> Option<PathBuf> {
+        if let Some(path) = CONFIG_PATH_OVERRIDE.get() {
+            return Some(path.clone());
+        }
         Self::config_dir().map(|dir| dir.join("config.toml"))
+    }
+
+    /// Make `default_path()` return the `--config` file for the rest of the
+    /// process. Setup commands write the config through `default_path()`, so
+    /// without this `voxtype --config X setup model --set M` edited the
+    /// user's real config instead of X.
+    pub fn set_path_override(path: PathBuf) {
+        let _ = CONFIG_PATH_OVERRIDE.set(path);
     }
 
     /// Get the system-wide config file path.

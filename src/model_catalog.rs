@@ -103,6 +103,15 @@ pub fn download_arg(engine: &str, model: &str) -> Option<String> {
     }
 }
 
+/// The command that fetches `model` for `engine`, for missing-model errors.
+/// ONNX and OpenVINO models are served from models.voxtype.io with
+/// verified manifests, so errors point here rather than at an upstream
+/// HuggingFace repo whose layout voxtype doesn't control.
+pub fn download_command(engine: &str, model: &str) -> String {
+    let arg = download_arg(engine, model).unwrap_or_else(|| model.to_string());
+    format!("voxtype setup --download --model {arg}")
+}
+
 /// On-disk location of a model: a single `ggml-<name>.bin` file for whisper,
 /// a directory for every ONNX engine.
 fn model_path(models_dir: &Path, engine: &str, model: &str) -> std::path::PathBuf {
@@ -408,6 +417,33 @@ fn override_problem_in(models_dir: &Path, config: &Config, name: &str) -> Option
         "Model '{name}' ({} engine) is not downloaded. Run: voxtype setup --download --model {download}",
         resolved.engine
     ))
+}
+
+/// Config for a transcriber serving a `--model` override: the user's
+/// settings with `engine` and its model swapped in. Streaming is switched
+/// off because override recordings take the batch path.
+pub fn override_config(
+    base: &Config,
+    engine: crate::config::TranscriptionEngine,
+    model: &str,
+) -> Config {
+    let mut config = base.clone();
+    config.set_model_for(engine, model);
+    config.whisper.streaming = false;
+    if let Some(parakeet) = config.parakeet.as_mut() {
+        parakeet.streaming = false;
+    }
+    if let Some(openvino) = config.openvino.as_mut() {
+        openvino.streaming = false;
+    }
+    if engine == crate::config::TranscriptionEngine::Whisper
+        && config.whisper.effective_mode() == crate::config::WhisperMode::Remote
+    {
+        // The remote backend sends `remote_model`, not `model`, the same
+        // substitution the Whisper model manager makes for its overrides.
+        config.whisper.remote_model = Some(model.to_string());
+    }
+    config
 }
 
 #[cfg(test)]
