@@ -419,10 +419,28 @@ fn read_output_mode_override() -> Option<OutputOverride> {
     }
 }
 
-/// Remove the output mode override file if it exists (for cleanup on cancel/error)
-fn cleanup_output_mode_override() {
-    let override_file = Config::runtime_dir().join("output_mode_override");
-    let _ = std::fs::remove_file(&override_file);
+/// Remove every per-recording override (`voxtype record start --file`,
+/// `--model`, `--profile`, `--auto-submit`, ...) when a recording is
+/// discarded. A normal stop, including a max-duration timeout, must leave
+/// them for the result handler, which reads them when it delivers the text.
+fn discard_recording_overrides() {
+    discard_recording_overrides_in(&Config::runtime_dir());
+}
+
+/// Every override file a single recording can carry, in the runtime dir.
+const RECORDING_OVERRIDE_FILES: [&str; 6] = [
+    "output_mode_override",
+    "model_override",
+    "profile_override",
+    "auto_submit_override",
+    "shift_enter_override",
+    "smart_auto_submit_override",
+];
+
+fn discard_recording_overrides_in(runtime_dir: &std::path::Path) {
+    for name in RECORDING_OVERRIDE_FILES {
+        let _ = std::fs::remove_file(runtime_dir.join(name));
+    }
 }
 
 /// Read and consume the profile override file
@@ -506,12 +524,6 @@ fn read_bool_override(name: &str) -> Option<bool> {
             None
         }
     }
-}
-
-/// Remove a boolean override file if it exists (for cleanup on cancel/error)
-fn cleanup_bool_override(name: &str) {
-    let override_file = Config::runtime_dir().join(format!("{}_override", name));
-    let _ = std::fs::remove_file(&override_file);
 }
 
 // === Meeting Mode IPC ===
@@ -797,8 +809,11 @@ async fn write_transcription_to_file(
         }
     }
 
-    // Ensure text ends with newline
-    let output_text = if text.ends_with('\n') {
+    // An empty transcript (post-processing returned nothing with
+    // fallback_on_empty off) writes nothing: overwrite still replaces the
+    // previous transcript, with an empty file, so a reader can't take the old
+    // text for this result, and append adds no blank line.
+    let output_text = if text.is_empty() || text.ends_with('\n') {
         text.to_string()
     } else {
         format!("{}\n", text)
@@ -818,6 +833,7 @@ async fn write_transcription_to_file(
                 return Err(e);
             }
         }
+        FileMode::Append if output_text.is_empty() => {}
         FileMode::Append => {
             let mut file = tokio::fs::OpenOptions::new()
                 .create(true)
@@ -825,6 +841,10 @@ async fn write_transcription_to_file(
                 .open(path)
                 .await?;
             file.write_all(output_text.as_bytes()).await?;
+            // tokio completes the write on a background thread; without the
+            // flush a reader right after this returns can still see the old
+            // file, and dropping the handle doesn't wait for it.
+            file.flush().await?;
         }
     }
 
@@ -925,12 +945,6 @@ fn read_model_override() -> Option<String> {
         tracing::info!("Model override requested: {}", model);
         Some(model)
     }
-}
-
-/// Remove the model override file if it exists (for cleanup on cancel/error)
-fn cleanup_model_override() {
-    let override_file = Config::runtime_dir().join("model_override");
-    let _ = std::fs::remove_file(&override_file);
 }
 
 /// Config for a transcriber serving a `--model` override: the user's
@@ -1896,10 +1910,7 @@ impl Daemon {
                 *tasks_in_flight = 0;
             }
 
-            cleanup_output_mode_override();
-            cleanup_model_override();
-            cleanup_profile_override();
-            cleanup_bool_override("smart_auto_submit");
+            discard_recording_overrides();
             // A cancelled external-trigger session is still an ended
             // session — tell the caller and disarm tracking.
             self.end_external_session(true).await;
@@ -1936,10 +1947,7 @@ impl Daemon {
             // next transcription.
             self.active_transcriber = None;
 
-            cleanup_output_mode_override();
-            cleanup_model_override();
-            cleanup_profile_override();
-            cleanup_bool_override("smart_auto_submit");
+            discard_recording_overrides();
             *state = State::Idle;
             self.update_state("idle");
             self.play_feedback(SoundEvent::Cancelled);
@@ -1995,12 +2003,7 @@ impl Daemon {
         *streaming_session = None;
         *streaming_chain = None;
 
-        cleanup_output_mode_override();
-        cleanup_model_override();
-        cleanup_profile_override();
-        cleanup_bool_override("auto_submit");
-        cleanup_bool_override("shift_enter");
-        cleanup_bool_override("smart_auto_submit");
+        discard_recording_overrides();
         *state = State::Idle;
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
@@ -2866,12 +2869,7 @@ impl Daemon {
     /// Reset state to idle and run post_output_command to reset compositor submap
     /// Call this when exiting from recording/transcribing without normal output flow
     async fn reset_to_idle(&mut self, state: &mut State) {
-        cleanup_output_mode_override();
-        cleanup_model_override();
-        cleanup_profile_override();
-        cleanup_bool_override("auto_submit");
-        cleanup_bool_override("shift_enter");
-        cleanup_bool_override("smart_auto_submit");
+        discard_recording_overrides();
         self.restore_recording_media();
         *state = State::Idle;
         self.update_state("idle");
@@ -3410,10 +3408,12 @@ impl Daemon {
                                     FileMode::Append => "appended",
                                 };
                                 tracing::info!("{} transcription to {:?}", mode_str, output_path);
-                                write_result_sidecar(
-                                    &output_path,
-                                    &TranscriptOutcome::ok(final_text.chars().count()),
-                                );
+                                let outcome = if final_text.is_empty() {
+                                    TranscriptOutcome::empty()
+                                } else {
+                                    TranscriptOutcome::ok(final_text.chars().count())
+                                };
+                                write_result_sidecar(&output_path, &outcome);
                                 self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
                             FileDelivery::FellBack(err) => {
@@ -4293,10 +4293,7 @@ impl Daemon {
                                     task.abort();
                                 }
 
-                                cleanup_output_mode_override();
-                                cleanup_model_override();
-                                cleanup_profile_override();
-                                cleanup_bool_override("smart_auto_submit");
+                                discard_recording_overrides();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -4320,10 +4317,7 @@ impl Daemon {
                                 // held until the next transcription.
                                 self.active_transcriber = None;
 
-                                cleanup_output_mode_override();
-                                cleanup_model_override();
-                                cleanup_profile_override();
-                                cleanup_bool_override("smart_auto_submit");
+                                discard_recording_overrides();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -4496,10 +4490,6 @@ impl Daemon {
                             max_duration.as_secs_f32()
                         );
 
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
 
                         let model_override = match &state {
                             State::Recording { model_override, .. } => model_override.clone(),
@@ -5399,6 +5389,81 @@ mod tests {
         // We can't easily mock Config::runtime_dir(), so we test the file operations
         // directly using the same logic as the functions under test
         f(runtime_dir)
+    }
+
+    #[test]
+    fn discarding_a_recording_clears_every_override_it_can_carry() {
+        // The cancel paths used to clear four of these and leave
+        // auto_submit/shift_enter behind for the next recording.
+        let dir = TempDir::new().unwrap();
+        for name in RECORDING_OVERRIDE_FILES {
+            fs::write(dir.path().join(name), "x").unwrap();
+        }
+        fs::write(dir.path().join("unrelated"), "keep").unwrap();
+        discard_recording_overrides_in(dir.path());
+        for name in RECORDING_OVERRIDE_FILES {
+            assert!(!dir.path().join(name).exists(), "{name} survived");
+        }
+        assert!(dir.path().join("unrelated").exists());
+    }
+
+    #[test]
+    fn override_file_list_matches_the_readers() {
+        // Every per-recording override the daemon reads must be discarded.
+        for name in [
+            "output_mode",
+            "model",
+            "profile",
+            "auto_submit",
+            "shift_enter",
+            "smart_auto_submit",
+        ] {
+            assert!(
+                RECORDING_OVERRIDE_FILES.contains(&format!("{name}_override").as_str()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_transcript_leaves_no_newline_behind() {
+        let dir = TempDir::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Overwrite still replaces the previous transcript, with nothing.
+        let overwrite = dir.path().join("overwrite.txt");
+        fs::write(&overwrite, "previous transcript\n").unwrap();
+        runtime
+            .block_on(write_transcription_to_file(
+                &overwrite,
+                "",
+                &FileMode::Overwrite,
+            ))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&overwrite).unwrap(), "");
+
+        // Append adds nothing and doesn't create a missing file.
+        let append = dir.path().join("append.txt");
+        fs::write(&append, "first\n").unwrap();
+        runtime
+            .block_on(write_transcription_to_file(&append, "", &FileMode::Append))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&append).unwrap(), "first\n");
+        let missing = dir.path().join("missing.txt");
+        runtime
+            .block_on(write_transcription_to_file(&missing, "", &FileMode::Append))
+            .unwrap();
+        assert!(!missing.exists());
+
+        // Non-empty text keeps its trailing newline.
+        runtime
+            .block_on(write_transcription_to_file(
+                &append,
+                "second",
+                &FileMode::Append,
+            ))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&append).unwrap(), "first\nsecond\n");
     }
 
     #[test]
