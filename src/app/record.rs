@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use voxtype::daemon::result_sidecar_path;
+use voxtype::daemon::{result_sidecar_path, trigger_stamp, START_REQUEST_FILE};
 use voxtype::{config, daemon_status, RecordAction};
 
 /// Send a record command to the running daemon via Unix signals or file triggers
@@ -28,12 +28,18 @@ pub(crate) fn send_record_command(
     // Handle cancel separately (uses file trigger instead of signal)
     if matches!(action, RecordAction::Cancel) {
         let state_file = config.resolve_state_file();
-        let was_active = state_file
-            .as_deref()
-            .is_some_and(|path| state_is_cancellable(&read_state(path)));
+        let runtime_dir = config::Config::runtime_dir();
+        // A start whose signal the daemon has not handled yet still counts:
+        // `record start; record cancel` back to back reaches this point
+        // before the state file says "recording".
+        let start_pending = runtime_dir.join(START_REQUEST_FILE).exists();
+        let was_active = start_pending
+            || state_file
+                .as_deref()
+                .is_some_and(|path| state_is_cancellable(&read_state(path)));
 
-        let cancel_file = config::Config::runtime_dir().join("cancel");
-        std::fs::write(&cancel_file, "cancel")
+        let cancel_file = runtime_dir.join("cancel");
+        std::fs::write(&cancel_file, trigger_stamp())
             .map_err(|e| anyhow::anyhow!("Failed to write cancel file: {}", e))?;
 
         // The daemon picks the trigger up on its next poll tick. Return only
@@ -43,7 +49,7 @@ pub(crate) fn send_record_command(
         // cancel sent while idle has nothing to wait for; its trigger is
         // consumed when the next recording starts.
         if let (true, Some(path)) = (was_active, state_file.as_deref()) {
-            if !await_cancel(path, CANCEL_ACK_TIMEOUT) {
+            if !await_cancel(&cancel_file, path, CANCEL_ACK_TIMEOUT) {
                 eprintln!(
                     "Warning: the daemon has not acknowledged the cancel after {}s",
                     CANCEL_ACK_TIMEOUT.as_secs()
@@ -214,8 +220,20 @@ pub(crate) fn send_record_command(
         _ => None,
     };
 
+    // Mark when this start was issued, so a `record cancel` that lands before
+    // the daemon handles the signal still cancels it instead of being swept
+    // up as a leftover.
+    let start_request = runtime_dir_file(START_REQUEST_FILE);
+    if signal == libc::SIGUSR1 {
+        std::fs::write(&start_request, trigger_stamp())
+            .map_err(|e| anyhow::anyhow!("Failed to write start request: {}", e))?;
+    }
+
     let result = unsafe { libc::kill(pid, signal) };
     if result != 0 {
+        if signal == libc::SIGUSR1 {
+            let _ = std::fs::remove_file(&start_request);
+        }
         return Err(anyhow::anyhow!(
             "Failed to send signal to daemon: {}",
             std::io::Error::last_os_error()
@@ -431,13 +449,21 @@ fn state_is_cancellable(state: &str) -> bool {
     matches!(state, "recording" | "streaming" | "transcribing")
 }
 
-/// Wait until the daemon leaves the cancellable states. Returns `false` on
-/// timeout.
-fn await_cancel(state_file: &Path, timeout: Duration) -> bool {
+fn runtime_dir_file(name: &str) -> PathBuf {
+    config::Config::runtime_dir().join(name)
+}
+
+/// Wait until the daemon has consumed the cancel trigger and left the
+/// cancellable states. Returns `false` on timeout.
+///
+/// Both conditions matter: a cancel that raced its start signal is consumed
+/// only once capture is live, so the state file can still read "idle" while
+/// the cancel is pending.
+fn await_cancel(cancel_file: &Path, state_file: &Path, timeout: Duration) -> bool {
     const POLL: Duration = Duration::from_millis(20);
     let deadline = Instant::now() + timeout;
     loop {
-        if !state_is_cancellable(&read_state(state_file)) {
+        if !cancel_file.exists() && !state_is_cancellable(&read_state(state_file)) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -463,8 +489,9 @@ mod tests {
             std::fs::write(&writer_state, "idle\n").unwrap();
         });
 
+        let cancel = dir.path().join("cancel");
         let started = Instant::now();
-        assert!(await_cancel(&state, Duration::from_secs(2)));
+        assert!(await_cancel(&cancel, &state, Duration::from_secs(2)));
         // Returned only after the simulated daemon went idle, so a
         // `record toggle` issued next reads idle and sends a start.
         assert!(started.elapsed() >= Duration::from_millis(150));
@@ -478,7 +505,36 @@ mod tests {
         let state = dir.path().join("state");
         std::fs::write(&state, "transcribing\n").unwrap();
 
-        assert!(!await_cancel(&state, Duration::from_millis(100)));
+        let cancel = dir.path().join("cancel");
+        assert!(!await_cancel(&cancel, &state, Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn cancel_racing_a_start_waits_for_the_trigger_to_be_consumed() {
+        // `record start; record cancel` back to back: the state file still
+        // reads idle, but the cancel is pending against the start the daemon
+        // is about to act on. Returning here would let a following toggle
+        // decide from a state that is about to change.
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let cancel = dir.path().join("cancel");
+        std::fs::write(&state, "idle\n").unwrap();
+        std::fs::write(&cancel, trigger_stamp()).unwrap();
+
+        let (writer_state, writer_cancel) = (state.clone(), cancel.clone());
+        let daemon = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            std::fs::write(&writer_state, "recording\n").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            std::fs::remove_file(&writer_cancel).unwrap();
+            std::fs::write(&writer_state, "idle\n").unwrap();
+        });
+
+        let started = Instant::now();
+        assert!(await_cancel(&cancel, &state, Duration::from_secs(2)));
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(!cancel.exists());
+        daemon.join().unwrap();
     }
 
     #[test]

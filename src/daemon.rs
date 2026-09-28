@@ -321,6 +321,72 @@ fn cleanup_cancel_file() {
     }
 }
 
+/// Written by `voxtype record start` (and a toggle that starts) just before
+/// it signals the daemon, stamped with [`trigger_stamp`].
+pub const START_REQUEST_FILE: &str = "start_requested";
+
+/// Wall-clock nanoseconds, the content of the `cancel` and
+/// [`START_REQUEST_FILE`] triggers. Both are written by separate CLI
+/// processes, so only the realtime clock orders them.
+pub fn trigger_stamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+        .to_string()
+}
+
+fn read_trigger_stamp(path: &std::path::Path) -> Option<u128> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// The start-request marker for the signal being handled. It stays on disk
+/// until this is dropped, after the start has run: while it exists a
+/// `record cancel` knows a start is in flight even though the state file
+/// does not say "recording" yet.
+struct StartRequest {
+    issued_at: Option<u128>,
+}
+
+impl StartRequest {
+    fn read() -> Self {
+        Self {
+            issued_at: read_trigger_stamp(&Config::runtime_dir().join(START_REQUEST_FILE)),
+        }
+    }
+}
+
+impl Drop for StartRequest {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(Config::runtime_dir().join(START_REQUEST_FILE));
+    }
+}
+
+/// Whether a cancel stamped `cancel_at` was issued for the start requested at
+/// `start_at`. A cancel from before the request, or one carrying no stamp,
+/// is a leftover from an idle `record cancel` and must not touch the new
+/// recording (#606).
+fn cancel_targets_start(start_at: Option<u128>, cancel_at: Option<u128>) -> bool {
+    matches!((start_at, cancel_at), (Some(start), Some(cancel)) if cancel >= start)
+}
+
+/// Drop a leftover cancel trigger before a recording starts, keeping one
+/// issued after this recording was requested. `record start; record cancel`
+/// sent back to back can put the cancel on disk before the daemon has acted
+/// on the start signal; the recording poll then applies it once capture is
+/// live.
+fn discard_stale_cancel(start_at: Option<u128>) {
+    let cancel_file = Config::runtime_dir().join("cancel");
+    if !cancel_file.exists() {
+        return;
+    }
+    if cancel_targets_start(start_at, read_trigger_stamp(&cancel_file)) {
+        tracing::debug!("Cancel was issued after this start request; applying it");
+        return;
+    }
+    let _ = std::fs::remove_file(&cancel_file);
+}
+
 /// Read and consume the output mode override file
 /// Returns the override mode if the file exists and is valid, None otherwise
 /// Output mode override result, which may include a file path for file mode
@@ -959,6 +1025,10 @@ type TranscriberLoadTask = tokio::task::JoinHandle<
 /// Main daemon that orchestrates all components
 pub struct Daemon {
     config: Config,
+    /// When the `record start` being handled was issued, while that start
+    /// runs. Lets a cancel racing the start signal survive the #606
+    /// stale-cancel sweep.
+    start_request: Option<u128>,
     config_path: Option<PathBuf>,
     state_file_path: Option<PathBuf>,
     pid_file_path: Option<PathBuf>,
@@ -1129,6 +1199,7 @@ impl Daemon {
         };
 
         Self {
+            start_request: None,
             config,
             config_path,
             state_file_path,
@@ -1308,8 +1379,9 @@ impl Daemon {
         // restarts forever. A stale trigger then kills this recording (and
         // each one after it) ~100-400ms in. Consume it here, at the single
         // point every recording path passes through, so a cancel can only
-        // ever apply to a recording that was live when it was issued (#606).
-        cleanup_cancel_file();
+        // ever apply to a recording that was live, or already requested,
+        // when it was issued (#606).
+        discard_stale_cancel(self.start_request);
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
@@ -1462,7 +1534,7 @@ impl Daemon {
         // Same stale-trigger hazard as start_recording_capture: Streaming is
         // an is_recording() state, so a leftover cancel file would kill the
         // session moments after it starts. See #606.
-        cleanup_cancel_file();
+        discard_stale_cancel(self.start_request);
         // An override model has its own transcriber, which records in batch
         // mode; streaming would run the default model instead.
         if let Some(name) = model_override.as_deref() {
@@ -3666,6 +3738,7 @@ impl Daemon {
 
         // Clean up any stale cancel and profile override files from previous runs
         cleanup_cancel_file();
+        let _ = std::fs::remove_file(Config::runtime_dir().join(START_REQUEST_FILE));
         cleanup_profile_override();
 
         // Clean up any stale meeting command files
@@ -4518,6 +4591,7 @@ impl Daemon {
                 // Handle SIGUSR1 - start recording (for compositor keybindings)
                 _ = sigusr1.recv() => {
                     tracing::debug!("Received SIGUSR1 (start recording)");
+                    let start_request = StartRequest::read();
                     // A `record cancel` sent just before this start is still
                     // waiting for its poll tick. Apply it first so commands
                     // take effect in the order they were issued; otherwise
@@ -4554,6 +4628,9 @@ impl Daemon {
 
                         self.suppress_recording_media().await;
 
+                        // A start request scopes the stale-cancel check to
+                        // this start; hotkey starts carry none.
+                        self.start_request = start_request.issued_at;
                         if self.try_start_streaming(
                             &mut state,
                             &mut audio_capture,
@@ -4602,6 +4679,7 @@ impl Daemon {
                                 }
                             }
                         }
+                        self.start_request = None;
                     }
                 }
 
@@ -4774,8 +4852,11 @@ impl Daemon {
 
                 // Clean up stale cancel file when idle and evict idle models
                 _ = tokio::time::sleep(Duration::from_millis(500)), if matches!(state, State::Idle) => {
-                    // Silently consume any stale cancel request
-                    let _ = check_cancel_requested();
+                    // Silently consume any stale cancel request, unless it
+                    // may belong to a start signal that has not landed yet.
+                    if !Config::runtime_dir().join(START_REQUEST_FILE).exists() {
+                        let _ = check_cancel_requested();
+                    }
 
                 }
 
@@ -5588,6 +5669,38 @@ mod tests {
             set_osd_suppressed_at(&marker, false);
             assert!(!marker.exists());
         });
+    }
+
+    #[test]
+    fn cancel_issued_after_a_start_request_targets_it() {
+        // `record start; record cancel` back to back.
+        assert!(cancel_targets_start(Some(100), Some(150)));
+        assert!(cancel_targets_start(Some(100), Some(100)));
+    }
+
+    #[test]
+    fn leftover_cancels_never_target_a_start() {
+        // An idle `record cancel`, then a start: #606's stale trigger.
+        assert!(!cancel_targets_start(Some(200), Some(150)));
+        // Hotkey starts carry no request.
+        assert!(!cancel_targets_start(None, Some(150)));
+        // Cancels from an older CLI carry no stamp.
+        assert!(!cancel_targets_start(Some(100), None));
+        assert!(!cancel_targets_start(None, None));
+    }
+
+    #[test]
+    fn trigger_stamps_round_trip_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cancel");
+        let first = trigger_stamp();
+        std::fs::write(&path, &first).unwrap();
+        assert_eq!(read_trigger_stamp(&path), first.parse().ok());
+        assert!(trigger_stamp().parse::<u128>().unwrap() >= first.parse::<u128>().unwrap());
+
+        std::fs::write(&path, "cancel").unwrap();
+        assert_eq!(read_trigger_stamp(&path), None);
+        assert_eq!(read_trigger_stamp(&dir.path().join("missing")), None);
     }
 
     #[test]
