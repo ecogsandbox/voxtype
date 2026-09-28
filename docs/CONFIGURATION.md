@@ -2696,9 +2696,19 @@ the transcribed text on stdin and should output the processed text on stdout.
 
 **Type:** String
 **Default:** None (disabled)
-**Required:** Yes (if section is present)
 
 The shell command to execute. Text is piped to stdin, processed text read from stdout.
+An empty or missing command turns post-processing off, so the section can hold
+`trim` or `fallback_on_empty` on its own.
+
+Every option in this section can be set from the command line:
+
+```bash
+voxtype config set output.post_process.command "sed 's/uh, //g'"
+voxtype config set output.post_process.trim false
+voxtype config set output.post_process.fallback_on_empty false
+voxtype config set output.post_process.timeout_ms 10000
+```
 
 **Examples:**
 ```toml

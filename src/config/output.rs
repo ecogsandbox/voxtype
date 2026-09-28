@@ -278,6 +278,14 @@ pub fn default_language_to_layout() -> std::collections::HashMap<String, String>
 }
 
 impl OutputConfig {
+    /// The post-process table, when it names a command to run. A table with
+    /// an empty command is only holding options, and post-processing is off.
+    pub fn active_post_process(&self) -> Option<&PostProcessConfig> {
+        self.post_process
+            .as_ref()
+            .filter(|p| !p.command.trim().is_empty())
+    }
+
     /// Apply per-language XKB layout/variant hints to eitype and dotool.
     ///
     /// Explicit driver-specific settings win independently per field:
@@ -420,6 +428,19 @@ pub enum FileMode {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn post_process_options_without_a_command_load_and_stay_off() {
+        let cfg: Config = toml::from_str("[output.post_process]\ntrim = false\n").unwrap();
+        let pp = cfg.output.post_process.as_ref().unwrap();
+        assert!(!pp.trim);
+        assert!(pp.fallback_on_empty);
+        assert!(cfg.output.active_post_process().is_none());
+
+        let cfg: Config =
+            toml::from_str("[output.post_process]\ncommand = \"cat\"\ntrim = false\n").unwrap();
+        assert_eq!(cfg.output.active_post_process().unwrap().command, "cat");
+    }
 
     #[test]
     fn test_parse_auto_submit() {
