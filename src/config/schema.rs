@@ -762,6 +762,97 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Enable live transcription through the shared sliding-window engine.",
     )
     .for_onnx_engine("openvino"),
+    // soniox
+    spec(
+        "soniox.api_key",
+        "soniox",
+        "api_key",
+        KeyType::String,
+        "Engine",
+        "API key",
+        "Soniox API key. Unset falls back to the SONIOX_API_KEY environment variable.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.model",
+        "soniox",
+        "model",
+        KeyType::String,
+        "Engine",
+        "Model",
+        "Soniox model name.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.language_hints_strict",
+        "soniox",
+        "language_hints_strict",
+        KeyType::Bool,
+        "Engine",
+        "Strict language hints",
+        "Keep recognition to the hinted languages. Ignored when there are no hints.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.streaming",
+        "soniox",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Streaming",
+        "Stream over a WebSocket with live partials. Off sends one request when you release the key.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.type_partials",
+        "soniox",
+        "type_partials",
+        KeyType::Bool,
+        "Engine",
+        "Type partials",
+        "Type partial results as they arrive. Off types only finalized segments.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.context",
+        "soniox",
+        "context",
+        KeyType::String,
+        "Engine",
+        "Context",
+        "Short domain description sent to Soniox, e.g. \"medical consultation\".",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.terms_file",
+        "soniox",
+        "terms_file",
+        KeyType::String,
+        "Engine",
+        "Terms file",
+        "Path to a JSON list of vocabulary boost terms, loaded at daemon startup.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.async_api",
+        "soniox",
+        "async_api",
+        KeyType::Bool,
+        "Engine",
+        "Async API",
+        "Use Soniox's async file API instead of the real-time one.",
+    )
+    .for_engine("soniox"),
+    spec(
+        "soniox.async_max_wait_secs",
+        "soniox",
+        "async_max_wait_secs",
+        KeyType::Int { min: 1, max: 3600 },
+        "Engine",
+        "Async max wait",
+        "Seconds to wait for an async transcription before giving up.",
+    )
+    .for_engine("soniox"),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -953,6 +1044,33 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Output",
         "Post-process command",
         "Shell command that receives the transcription on stdin and returns the cleaned text on stdout.",
+    ),
+    spec(
+        "output.post_process.timeout_ms",
+        "output.post_process",
+        "timeout_ms",
+        KeyType::Int { min: 100, max: 600_000 },
+        "Output",
+        "Post-process timeout",
+        "Milliseconds to wait for the post-process command before typing the original text.",
+    ),
+    spec(
+        "output.post_process.trim",
+        "output.post_process",
+        "trim",
+        KeyType::Bool,
+        "Output",
+        "Trim post-process output",
+        "Strip leading and trailing whitespace from the command's output. Turn off to keep a deliberate trailing space.",
+    ),
+    spec(
+        "output.post_process.fallback_on_empty",
+        "output.post_process",
+        "fallback_on_empty",
+        KeyType::Bool,
+        "Output",
+        "Keep text when output is empty",
+        "Output the original transcription when the command prints nothing. Turn off to let the command drop a transcription.",
     ),
     // -- Text ---------------------------------------------------------------
     spec(
@@ -1316,6 +1434,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Status",
         "Transcribing icon",
         "Override the theme's transcribing glyph.",
+    )
+    .live(),
+    spec(
+        "status.icons.streaming",
+        "status.icons",
+        "streaming",
+        KeyType::String,
+        "Status",
+        "Streaming icon",
+        "Override the theme's streaming glyph.",
     )
     .live(),
     spec(
@@ -1911,6 +2039,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "RMS below which a diarization sub-window counts as silence.",
     ),
     spec(
+        "meeting.diarization.model_path",
+        "meeting.diarization",
+        "model_path",
+        KeyType::String,
+        "Meeting",
+        "Diarization model",
+        "Path to the ONNX speaker model for the ml backend. Unset uses the downloaded default.",
+    ),
+    spec(
         "meeting.summary.backend",
         "meeting.summary",
         "backend",
@@ -1936,6 +2073,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Meeting",
         "Ollama model",
         "Model the local summary backend asks Ollama for.",
+    ),
+    spec(
+        "meeting.summary.remote_endpoint",
+        "meeting.summary",
+        "remote_endpoint",
+        KeyType::String,
+        "Meeting",
+        "Remote summary endpoint",
+        "API endpoint for the remote summary backend.",
+    ),
+    spec(
+        "meeting.summary.remote_api_key",
+        "meeting.summary",
+        "remote_api_key",
+        KeyType::String,
+        "Meeting",
+        "Remote summary API key",
+        "API key for the remote summary backend.",
     ),
     spec(
         "meeting.summary.timeout_secs",
@@ -2195,15 +2350,13 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
 fn ensure_required_siblings(editor: &mut ConfigEditor, spec: &KeySpec) {
     let Some(engine) = spec.engine else { return };
     // Whisper's table is not optional and its `model` has a serde default.
-    if engine == "whisper" || spec.field == "model" {
+    // An engine with no catalog default (Soniox) defaults `model` in serde.
+    let default = crate::model_catalog::default_model(engine);
+    if engine == "whisper" || spec.field == "model" || default.is_empty() {
         return;
     }
     if editor.get_string(spec.table, "model").is_none() {
-        editor.set_string(
-            spec.table,
-            "model",
-            crate::model_catalog::default_model(engine),
-        );
+        editor.set_string(spec.table, "model", default);
     }
 }
 
@@ -2268,6 +2421,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let om = || cfg.omnilingual.clone().unwrap_or_default();
     let co = || cfg.cohere.clone().unwrap_or_default();
     let ov = || cfg.openvino.clone().unwrap_or_default();
+    let so = || cfg.soniox.clone().unwrap_or_default();
+    // Without a table, post-processing is off; report the values a new
+    // table would start with.
+    let pp = || cfg.output.post_process.clone().unwrap_or_default();
 
     let v = match key {
         "engine" => json!(cfg.engine.name()),
@@ -2365,6 +2522,19 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "openvino.openvino_dir" => opt_str(ov().openvino_dir.as_ref()),
         "openvino.streaming" => json!(ov().streaming),
 
+        "soniox.api_key" => opt_str(so().api_key.as_ref()),
+        "soniox.model" => json!(so().model),
+        "soniox.language_hints_strict" => json!(so().language_hints_strict),
+        "soniox.streaming" => json!(so().streaming),
+        "soniox.type_partials" => json!(so().type_partials),
+        "soniox.context" => opt_str(so().context.as_ref()),
+        "soniox.terms_file" => match so().terms_file {
+            Some(p) => json!(p.to_string_lossy()),
+            None => Json::Null,
+        },
+        "soniox.async_api" => json!(so().async_api),
+        "soniox.async_max_wait_secs" => json!(so().async_max_wait_secs),
+
         "hotkey.enabled" => json!(cfg.hotkey.enabled),
         "hotkey.key" => json!(cfg.hotkey.key),
         "hotkey.mode" => json!(match cfg.hotkey.mode {
@@ -2394,6 +2564,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(p) => json!(p.command),
             None => Json::Null,
         },
+        "output.post_process.timeout_ms" => json!(pp().timeout_ms),
+        "output.post_process.trim" => json!(pp().trim),
+        "output.post_process.fallback_on_empty" => json!(pp().fallback_on_empty),
 
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
@@ -2457,6 +2630,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "status.icons.idle" => opt_str(cfg.status.icons.idle.as_ref()),
         "status.icons.recording" => opt_str(cfg.status.icons.recording.as_ref()),
         "status.icons.transcribing" => opt_str(cfg.status.icons.transcribing.as_ref()),
+        "status.icons.streaming" => opt_str(cfg.status.icons.streaming.as_ref()),
         "status.icons.stopped" => opt_str(cfg.status.icons.stopped.as_ref()),
 
         "output.file_path" => cfg
@@ -2529,9 +2703,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.diarization.vad_window_secs" => json!(cfg.meeting.diarization.vad_window_secs),
         "meeting.diarization.vad_hop_secs" => json!(cfg.meeting.diarization.vad_hop_secs),
         "meeting.diarization.vad_rms_floor" => json!(cfg.meeting.diarization.vad_rms_floor),
+        "meeting.diarization.model_path" => opt_str(cfg.meeting.diarization.model_path.as_ref()),
         "meeting.summary.backend" => json!(cfg.meeting.summary.backend),
         "meeting.summary.ollama_url" => json!(cfg.meeting.summary.ollama_url),
         "meeting.summary.ollama_model" => json!(cfg.meeting.summary.ollama_model),
+        "meeting.summary.remote_endpoint" => opt_str(cfg.meeting.summary.remote_endpoint.as_ref()),
+        "meeting.summary.remote_api_key" => opt_str(cfg.meeting.summary.remote_api_key.as_ref()),
         "meeting.summary.timeout_secs" => json!(cfg.meeting.summary.timeout_secs),
 
         _ => return None,
@@ -3022,11 +3199,13 @@ mod tests {
     fn onnx_engine_keys_are_feature_gated() {
         for s in CONFIG_KEYS {
             let Some(engine) = s.engine else { continue };
-            if engine == "whisper" {
+            // Whisper and the Soniox cloud client are always compiled in.
+            if engine == "whisper" || engine == "soniox" {
                 assert!(
                     s.requires_feature.is_none(),
-                    "{} should not be feature-gated; whisper is always compiled in",
-                    s.key
+                    "{} should not be feature-gated; {} is always compiled in",
+                    s.key,
+                    engine
                 );
             } else {
                 assert_eq!(
@@ -3181,5 +3360,88 @@ mod tests {
             };
             assert_eq!(s.compiled(), feature_compiled(feature), "{}", s.key);
         }
+    }
+
+    /// Fields `config set` deliberately doesn't reach. Everything else a
+    /// config struct can hold as a scalar needs a [`KeySpec`], or the
+    /// "reaches every setting" promise quietly stops being true.
+    const NOT_SETTABLE: &[&str] = &[
+        // Deprecated aliases, still read for old configs.
+        "whisper.backend",
+        "whisper.eager_overlap_secs",
+        "output.wtype_delay_ms",
+        // Deprecated per-engine copies of the shared [streaming] table.
+        "whisper.streaming_interval_secs",
+        "whisper.streaming_max_buffer_secs",
+        "whisper.streaming_min_audio_secs",
+        "whisper.streaming_min_speech_rms",
+        "whisper.streaming_partial_min_words",
+        "whisper.streaming_revision_mode",
+        "whisper.streaming_type_partials",
+        "openvino.streaming_interval_secs",
+        "openvino.streaming_max_buffer_secs",
+        "openvino.streaming_min_audio_secs",
+        "openvino.streaming_min_speech_rms",
+        "openvino.streaming_partial_min_words",
+        "openvino.streaming_revision_mode",
+        "openvino.streaming_type_partials",
+        // Lists, which need a hand edit.
+        "output.driver_order",
+        "soniox.terms",
+    ];
+
+    /// Tables of arbitrary keys, also a hand edit.
+    const NOT_SETTABLE_TABLES: &[&str] = &["output.language_to_layout."];
+
+    fn scalar_leaves(prefix: &str, v: &Json, out: &mut Vec<String>) {
+        match v {
+            Json::Object(m) => {
+                for (k, v) in m {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    scalar_leaves(&path, v, out);
+                }
+            }
+            Json::Array(_) => {}
+            _ => out.push(prefix.to_string()),
+        }
+    }
+
+    #[test]
+    fn every_scalar_config_field_has_a_key() {
+        // Materialize every optional table so its fields are visible.
+        let mut src: String = [
+            "parakeet",
+            "moonshine",
+            "sensevoice",
+            "paraformer",
+            "dolphin",
+            "omnilingual",
+            "cohere",
+            "openvino",
+            "soniox",
+        ]
+        .iter()
+        .map(|t| format!("[{t}]\nmodel = \"m\"\n"))
+        .collect();
+        src.push_str("[streaming]\n[output.post_process]\ncommand = \"cat\"\n");
+        let cfg: Config = toml::from_str(&src).expect("materialized config parses");
+
+        let mut leaves = Vec::new();
+        scalar_leaves("", &serde_json::to_value(&cfg).unwrap(), &mut leaves);
+        let keys: std::collections::HashSet<&str> = scalar_keys().map(|s| s.key).collect();
+        let missing: Vec<_> = leaves
+            .iter()
+            .filter(|l| !keys.contains(l.as_str()))
+            .filter(|l| !NOT_SETTABLE.contains(&l.as_str()))
+            .filter(|l| !NOT_SETTABLE_TABLES.iter().any(|t| l.starts_with(t)))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "config fields with no schema key: {missing:?}"
+        );
     }
 }
