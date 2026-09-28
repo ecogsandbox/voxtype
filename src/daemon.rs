@@ -667,10 +667,16 @@ fn check_meeting_start() -> Option<MeetingStartTrigger> {
         read_trimmed_nonempty(&diarization_file).and_then(validate_diarization_override);
     let _ = std::fs::remove_file(&diarization_file);
 
-    // Remove the start trigger last to acknowledge the command.
-    let _ = std::fs::remove_file(&start_file);
-
+    // The start trigger stays on disk until `ack_meeting_start`, once the
+    // meeting is recording or refused. While it exists a second
+    // `voxtype meeting start` sees a start in flight and refuses, which it
+    // cannot tell from the state file until the meeting is up.
     Some(MeetingStartTrigger { title, diarization })
+}
+
+/// Acknowledge a meeting start trigger read by `check_meeting_start`.
+fn ack_meeting_start() {
+    let _ = std::fs::remove_file(Config::runtime_dir().join("meeting_start"));
 }
 
 /// Check for meeting stop command (via file trigger)
@@ -2780,6 +2786,61 @@ impl Daemon {
         Ok(())
     }
 
+    /// Act on pending meeting file triggers. Returns whether the meeting
+    /// changed state, so the audio branch can skip this tick's samples.
+    ///
+    /// Every trigger is consumed whether or not it applies, so a request the
+    /// daemon refused cannot fire later against a different meeting.
+    async fn handle_meeting_triggers(&mut self) -> bool {
+        let mut changed = false;
+
+        if let Some(trigger) = check_meeting_start() {
+            if !self.config.meeting.enabled {
+                tracing::warn!("Meeting mode is disabled in config");
+            } else if self.meeting_daemon.is_some() {
+                tracing::warn!("Meeting already in progress; ignoring start request");
+            } else {
+                tracing::debug!("Meeting start requested via file trigger");
+                if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
+                    tracing::error!("Failed to start meeting: {}", e);
+                }
+                changed = true;
+            }
+            ack_meeting_start();
+        }
+
+        if check_meeting_stop() && self.meeting_daemon.is_some() {
+            tracing::debug!("Meeting stop requested via file trigger");
+            if let Err(e) = self.stop_meeting().await {
+                tracing::error!("Failed to stop meeting: {}", e);
+            }
+            changed = true;
+        }
+
+        if check_meeting_pause() && self.meeting_active() {
+            tracing::debug!("Meeting pause requested via file trigger");
+            if let Err(e) = self.pause_meeting().await {
+                tracing::error!("Failed to pause meeting: {}", e);
+            }
+            changed = true;
+        }
+
+        if check_meeting_resume()
+            && self
+                .meeting_daemon
+                .as_ref()
+                .is_some_and(|d| d.state().is_paused())
+        {
+            tracing::debug!("Meeting resume requested via file trigger");
+            if let Err(e) = self.resume_meeting().await {
+                tracing::error!("Failed to resume meeting: {}", e);
+            }
+            changed = true;
+        }
+
+        changed
+    }
+
     /// Check if a meeting is in progress
     fn meeting_active(&self) -> bool {
         self.meeting_daemon
@@ -4886,73 +4947,17 @@ impl Daemon {
                         }
                     }
 
-                    // Check for meeting start command
-                    if let Some(trigger) = check_meeting_start() {
-                        if self.config.meeting.enabled && self.meeting_daemon.is_none() {
-                            tracing::debug!("Meeting start requested via file trigger");
-                            if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
-                                tracing::error!("Failed to start meeting: {}", e);
-                            }
-                        } else if !self.config.meeting.enabled {
-                            tracing::warn!("Meeting mode is disabled in config");
-                        } else {
-                            tracing::warn!("Meeting already in progress");
-                        }
-                    }
-
-                    // Check for meeting stop command
-                    if check_meeting_stop()
-                        && self.meeting_daemon.is_some() {
-                            tracing::debug!("Meeting stop requested via file trigger");
-                            if let Err(e) = self.stop_meeting().await {
-                                tracing::error!("Failed to stop meeting: {}", e);
-                            }
-                        }
-
-                    // Check for meeting pause command
-                    if check_meeting_pause()
-                        && self.meeting_active() {
-                            tracing::debug!("Meeting pause requested via file trigger");
-                            if let Err(e) = self.pause_meeting().await {
-                                tracing::error!("Failed to pause meeting: {}", e);
-                            }
-                        }
-
-                    // Check for meeting resume command
-                    if check_meeting_resume()
-                        && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused()) {
-                            tracing::debug!("Meeting resume requested via file trigger");
-                            if let Err(e) = self.resume_meeting().await {
-                                tracing::error!("Failed to resume meeting: {}", e);
-                            }
-                        }
+                    self.handle_meeting_triggers().await;
                 }
 
                 // Process meeting audio chunks
                 _ = tokio::time::sleep(Duration::from_millis(50)), if self.meeting_active() => {
-                    // Check for meeting stop/pause/resume while active
-                    // (the 100ms polling branch is starved by this faster 50ms branch)
-                    if check_meeting_stop() && self.meeting_daemon.is_some() {
-                        tracing::debug!("Meeting stop requested via file trigger");
-                        if let Err(e) = self.stop_meeting().await {
-                            tracing::error!("Failed to stop meeting: {}", e);
-                        }
-                        continue;
-                    }
-                    if check_meeting_pause() && self.meeting_active() {
-                        tracing::debug!("Meeting pause requested via file trigger");
-                        if let Err(e) = self.pause_meeting().await {
-                            tracing::error!("Failed to pause meeting: {}", e);
-                        }
-                        continue;
-                    }
-                    if check_meeting_resume()
-                        && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused())
-                    {
-                        tracing::debug!("Meeting resume requested via file trigger");
-                        if let Err(e) = self.resume_meeting().await {
-                            tracing::error!("Failed to resume meeting: {}", e);
-                        }
+                    // The 100ms polling branch is starved by this faster one
+                    // while a meeting records, so every meeting trigger is
+                    // handled here too. A start that went unread here used to
+                    // sit on disk and begin a second meeting the moment this
+                    // one stopped.
+                    if self.handle_meeting_triggers().await {
                         continue;
                     }
 
