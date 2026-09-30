@@ -301,6 +301,8 @@ impl PasteOutput {
 
         // Spawn wl-copy with stdin pipe
         let mut child = Command::new("wl-copy")
+            .arg("--type")
+            .arg(super::clipboard::WL_COPY_TEXT_MIME)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
