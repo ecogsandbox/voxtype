@@ -468,6 +468,15 @@ fn is_keystroke_method(name: &str) -> bool {
     matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
 }
 
+/// True when any method in the chain synthesizes keystrokes, so the
+/// modifier-release guard has something to protect. Clipboard-only chains
+/// (clipboard mode, or a `driver_order` of clipboard drivers) never press a
+/// key, and building the guard costs hundreds of milliseconds on hosts with
+/// many input devices (#543), so they skip it.
+fn chain_synthesizes_keystrokes<'a>(names: impl IntoIterator<Item = &'a str>) -> bool {
+    names.into_iter().any(is_keystroke_method)
+}
+
 /// Try each output method in the chain until one succeeds
 /// Pre/post output commands are run before and after typing (for compositor integration).
 pub async fn output_with_fallback(
@@ -488,7 +497,9 @@ pub async fn output_with_fallback(
     // wait_for_modifiers_release in osascript.rs and gets called separately
     // from the osascript output path.
     #[cfg(target_os = "linux")]
-    if options.wait_for_modifier_release {
+    if options.wait_for_modifier_release
+        && chain_synthesizes_keystrokes(chain.iter().map(|o| o.name()))
+    {
         let mut guard = modifier_guard::ModifierGuard::new();
         if guard
             .wait_for_release(options.modifier_release_timeout)
@@ -641,6 +652,24 @@ mod tests {
         assert!(is_keystroke_method("paste (clipboard + keystroke)"));
         assert!(!is_keystroke_method("clipboard (wl-copy)"));
         assert!(!is_keystroke_method("clipboard (xclip/xsel)"));
+    }
+
+    #[test]
+    fn test_chain_synthesizes_keystrokes() {
+        assert!(!chain_synthesizes_keystrokes(["clipboard (wl-copy)"]));
+        assert!(!chain_synthesizes_keystrokes([
+            "clipboard (wl-copy)",
+            "clipboard (xclip/xsel)"
+        ]));
+        assert!(!chain_synthesizes_keystrokes(std::iter::empty::<&str>()));
+        assert!(chain_synthesizes_keystrokes([
+            "paste (clipboard + keystroke)"
+        ]));
+        assert!(chain_synthesizes_keystrokes([
+            "wtype",
+            "dotool",
+            "clipboard (wl-copy)"
+        ]));
     }
 
     #[test]
