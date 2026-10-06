@@ -119,7 +119,15 @@ pub(crate) async fn dispatch(
             menubar::run(state_file);
         }
 
-        Commands::Transcribe { file, engine } => {
+        Commands::Transcribe {
+            file,
+            engine,
+            enhance,
+            no_enhance,
+        } => {
+            if enhance || no_enhance {
+                config.audio.enhance = enhance;
+            }
             if let Some(engine_name) = engine {
                 match engine_name.parse::<config::TranscriptionEngine>() {
                     Ok(e) => config.engine = e,
@@ -346,6 +354,10 @@ pub(crate) async fn dispatch(
                 Some(SetupAction::Compositor { compositor_type }) => {
                     warn_if_root("compositor");
                     setup::compositor::run(&compositor_type).await?;
+                }
+                Some(SetupAction::Enhancer) => {
+                    warn_if_root("enhancer");
+                    setup::model::setup_enhancer()?;
                 }
                 Some(SetupAction::Vad { status }) => {
                     warn_if_root("vad");

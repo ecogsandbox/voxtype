@@ -61,6 +61,17 @@ pub(crate) fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow
         final_samples.len() as f32 / 16000.0
     );
 
+    #[cfg(feature = "onnx-common")]
+    let final_samples =
+        match voxtype::audio::enhance::GtcrnEnhancer::load_for_dictation(config.audio.enhance) {
+            Some(enhancer) => enhancer.enhance_dictation(final_samples, 16000),
+            None => final_samples,
+        };
+    #[cfg(not(feature = "onnx-common"))]
+    if config.audio.enhance {
+        tracing::warn!("Speech enhancement requires a build with ONNX support, continuing without");
+    }
+
     // Run VAD if enabled
     if let Ok(Some(vad)) = vad::create_vad(config) {
         match vad.detect(&final_samples) {

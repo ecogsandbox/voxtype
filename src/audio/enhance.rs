@@ -25,6 +25,45 @@ pub struct GtcrnEnhancer {
 }
 
 impl GtcrnEnhancer {
+    /// Load the installed model for dictation, without downloading it.
+    pub fn load_for_dictation(enabled: bool) -> Option<Self> {
+        if !enabled {
+            return None;
+        }
+        let model_path = crate::config::Config::models_dir().join("gtcrn_simple.onnx");
+        if !model_path.exists() {
+            tracing::warn!(
+                "GTCRN model not found at {:?}, continuing without enhancement. Run: voxtype setup enhancer",
+                model_path
+            );
+            return None;
+        }
+        match Self::load(&model_path) {
+            Ok(enhancer) => Some(enhancer),
+            Err(e) => {
+                tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Prepare mono f32 dictation audio at 16 kHz before VAD/transcription.
+    /// Falls back to unenhanced audio if inference fails.
+    pub fn enhance_dictation(&self, samples: Vec<f32>, sample_rate: u32) -> Vec<f32> {
+        let samples = if sample_rate != 16000 {
+            super::resampler::resample_buffer(&samples, sample_rate, 16000)
+        } else {
+            samples
+        };
+        match self.enhance(&samples) {
+            Ok(enhanced) => enhanced,
+            Err(e) => {
+                tracing::warn!("GTCRN enhancement failed, using raw dictation audio: {}", e);
+                samples
+            }
+        }
+    }
+
     /// Load the GTCRN model from the given ONNX file path
     pub fn load(model_path: &std::path::Path) -> Result<Self, String> {
         let session = Session::builder()
@@ -269,6 +308,33 @@ fn istft(frames: &[Vec<Complex<f32>>], target_len: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dictation_enhancement_preserves_length_and_sample_rate() {
+        let model_path = crate::config::Config::models_dir().join("gtcrn_simple.onnx");
+        if !model_path.exists() {
+            eprintln!(
+                "Skipping GTCRN inference test: model not found at {:?}",
+                model_path
+            );
+            return;
+        }
+        let enhancer = GtcrnEnhancer::load(&model_path).unwrap();
+        let sample_rate = 16000;
+        let samples: Vec<f32> = (0..sample_rate)
+            .map(|i| {
+                (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin() * 0.1
+            })
+            .collect();
+        // Exercise inference directly so a fallback cannot hide a broken model.
+        let enhanced = enhancer.enhance(&samples).unwrap();
+        assert_eq!(enhanced.len(), samples.len());
+        assert!(enhanced.iter().all(|sample| sample.is_finite()));
+        let prepared = enhancer.enhance_dictation(samples, sample_rate);
+        assert_eq!(prepared, enhanced);
+        // A one-second mono buffer still contains 16000 samples.
+        assert_eq!(prepared.len(), sample_rate as usize);
+    }
 
     #[test]
     fn test_stft_istft_roundtrip() {

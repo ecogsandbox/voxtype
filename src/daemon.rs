@@ -880,6 +880,9 @@ pub struct Daemon {
     // GTCRN speech enhancer for mic echo cancellation
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
+    // Loaded once at startup for batch dictation, independently of meeting mode.
+    #[cfg(feature = "onnx-common")]
+    dictation_enhancer: Option<Arc<audio::enhance::GtcrnEnhancer>>,
     // Media players that were paused when recording started (for resume on stop)
     paused_media_players: Vec<String>,
     // Audio streams that were ducked when recording started (for restore on recording stop)
@@ -959,6 +962,14 @@ impl Daemon {
             }
         };
 
+        #[cfg(feature = "onnx-common")]
+        let dictation_enhancer =
+            audio::enhance::GtcrnEnhancer::load_for_dictation(config.audio.enhance).map(Arc::new);
+        #[cfg(not(feature = "onnx-common"))]
+        if config.audio.enhance {
+            tracing::warn!("Speech enhancement requires a build with ONNX support, continuing without");
+        }
+
         // Meeting state file path (separate from push-to-talk state)
         let meeting_state_file_path = if state_file_path.is_some() {
             Some(Config::runtime_dir().join("meeting_state"))
@@ -997,6 +1008,8 @@ impl Daemon {
             meeting_event_rx: None,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
+            #[cfg(feature = "onnx-common")]
+            dictation_enhancer,
             paused_media_players: Vec::new(),
             ducked_media_streams: Vec::new(),
             media_fade_task: None,
@@ -2514,6 +2527,25 @@ impl Daemon {
 
             match stop_result {
                 Ok(samples) => {
+                    #[cfg(feature = "onnx-common")]
+                    let samples = if let Some(enhancer) = self.dictation_enhancer.clone() {
+                        let sample_rate = self.config.audio.sample_rate;
+                        match tokio::task::spawn_blocking(move || {
+                            enhancer.enhance_dictation(samples, sample_rate)
+                        })
+                        .await
+                        {
+                            Ok(samples) => samples,
+                            Err(e) => {
+                                tracing::error!("Dictation enhancement task failed: {}", e);
+                                self.publish_empty_outcome();
+                                self.reset_to_idle(state).await;
+                                return false;
+                            }
+                        }
+                    } else {
+                        samples
+                    };
                     let audio_duration = samples.len() as f32 / 16000.0;
 
                     // Skip if too short (likely accidental press)

@@ -640,7 +640,7 @@ mod tests {
     fn test_transcribe_engine_flag() {
         let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav", "--engine", "moonshine"]);
         match cli.command {
-            Some(Commands::Transcribe { file, engine }) => {
+            Some(Commands::Transcribe { file, engine, .. }) => {
                 assert_eq!(file, std::path::PathBuf::from("test.wav"));
                 assert_eq!(engine, Some("moonshine".to_string()));
             }
@@ -668,5 +668,35 @@ mod tests {
             }
             _ => panic!("Expected Transcribe command"),
         }
+    }
+
+    #[test]
+    fn test_transcribe_enhance_flags() {
+        for (flag, expected) in [
+            (None, (false, false)),
+            (Some("--enhance"), (true, false)),
+            (Some("--no-enhance"), (false, true)),
+        ] {
+            let mut args = vec!["voxtype", "transcribe", "test.wav"];
+            args.extend(flag);
+            match Cli::parse_from(args).command {
+                Some(Commands::Transcribe {
+                    enhance,
+                    no_enhance,
+                    ..
+                }) => {
+                    assert_eq!((enhance, no_enhance), expected);
+                }
+                _ => panic!("Expected Transcribe command"),
+            }
+        }
+        assert!(Cli::try_parse_from([
+            "voxtype",
+            "transcribe",
+            "test.wav",
+            "--enhance",
+            "--no-enhance"
+        ])
+        .is_err());
     }
 }

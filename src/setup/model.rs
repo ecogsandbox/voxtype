@@ -2187,6 +2187,24 @@ pub fn download_model(model_name: &str) -> anyhow::Result<()> {
 const GTCRN_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx";
 const GTCRN_MODEL_FILENAME: &str = "gtcrn_simple.onnx";
 
+/// Download the GTCRN model for dictation enhancement.
+pub fn setup_enhancer() -> anyhow::Result<()> {
+    let model_path = Config::models_dir().join(GTCRN_MODEL_FILENAME);
+    if model_path.exists() {
+        print_success(&format!("GTCRN model already installed: {:?}", model_path));
+        print_info("To re-download, delete the file and run this command again.");
+        return Ok(());
+    }
+    let model_path = ensure_gtcrn_model()
+        .ok_or_else(|| anyhow::anyhow!("Failed to download GTCRN speech enhancement model"))?;
+    print_success(&format!("Saved to {:?}", model_path));
+    println!();
+    print_info("Enable in config.toml:");
+    println!("  [audio]");
+    println!("  enhance = true");
+    Ok(())
+}
+
 /// ECAPA-TDNN speaker embedding model URL and filename
 const ECAPA_MODEL_URL: &str =
     "https://huggingface.co/pranjal-pravesh/ecapa_tdnn_onnx/resolve/main/ecapa_tdnn.onnx";

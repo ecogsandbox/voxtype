@@ -372,6 +372,23 @@ Audio sample rate in Hz. Whisper expects 16000 Hz; other rates will be resampled
 sample_rate = 16000
 ```
 
+### enhance
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Run the GTCRN speech enhancer on dictation audio before transcription (noise and speaker bleed removal, 16 kHz). Model: voxtype setup enhancer.
+
+Applies to batch push-to-talk recordings and `voxtype transcribe`. Eager and streaming transcription are unaffected. Requires a build with ONNX support. If the model is missing, Voxtype logs a warning and continues without enhancement.
+
+```toml
+[audio]
+enhance = false
+```
+
+Use `voxtype transcribe recording.wav --enhance` or `--no-enhance` to override the config for one file.
+
 ### max_duration_secs
 
 **Type:** Integer

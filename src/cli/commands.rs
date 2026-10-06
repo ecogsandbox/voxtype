@@ -31,6 +31,14 @@ pub enum Commands {
             long_help = format!("Override transcription engine: {}", super::ENGINE_NAMES_CSV),
         )]
         engine: Option<String>,
+
+        /// Run the GTCRN speech enhancer before transcription (overrides config)
+        #[arg(long, conflicts_with = "no_enhance")]
+        enhance: bool,
+
+        /// Disable speech enhancement (overrides config)
+        #[arg(long, conflicts_with = "enhance")]
+        no_enhance: bool,
     },
 
     /// Internal: Worker process for GPU-isolated transcription

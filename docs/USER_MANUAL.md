@@ -104,6 +104,9 @@ Transcribe an audio file without running the daemon.
 ```bash
 voxtype transcribe recording.wav
 voxtype --model large-v3 transcribe interview.wav  # Use specific model
+voxtype setup enhancer                          # Download the GTCRN model
+voxtype transcribe recording.wav --enhance       # Remove noise before transcription
+voxtype transcribe recording.wav --no-enhance    # Override audio.enhance = true
 ```
 
 Supported formats: WAV (16-bit PCM, 16kHz mono recommended)

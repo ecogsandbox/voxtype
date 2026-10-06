@@ -802,6 +802,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     ),
     // -- Audio --------------------------------------------------------------
     spec(
+        "audio.enhance",
+        "audio",
+        "enhance",
+        KeyType::Bool,
+        "Audio",
+        "Enhance dictation audio",
+        "Run the GTCRN speech enhancer on dictation audio before transcription (noise and speaker bleed removal, 16 kHz). Model: voxtype setup enhancer.",
+    ),
+    spec(
         "audio.device",
         "audio",
         "device",
@@ -1774,6 +1783,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
 
         "audio.device" => json!(cfg.audio.device),
+        "audio.enhance" => json!(cfg.audio.enhance),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
         "audio.pause_media" => json!(cfg.audio.pause_media),
         "audio.duck_media" => json!(cfg.audio.duck_media),

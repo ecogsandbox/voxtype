@@ -199,6 +199,9 @@ pub enum SetupAction {
         status: bool,
     },
 
+    /// Download the GTCRN speech enhancement model
+    Enhancer,
+
     /// Install the Quickshell QML tree for the voxtype-osd-quickshell launcher
     ///
     /// Copies shell.qml, OsdSurface.qml, EnginePicker.qml,
@@ -305,6 +308,18 @@ mod tests {
     use super::*;
     use crate::cli::*;
     use clap::Parser;
+
+    #[test]
+    fn test_setup_enhancer() {
+        let cli = Cli::parse_from(["voxtype", "setup", "enhancer"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Setup {
+                action: Some(SetupAction::Enhancer),
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn test_setup_quiet_flag() {

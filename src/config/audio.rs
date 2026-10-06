@@ -13,6 +13,11 @@ pub struct AudioConfig {
     #[serde(default = "default_audio_sample_rate")]
     pub sample_rate: u32,
 
+    /// Run the GTCRN speech enhancer on dictation audio before transcription
+    /// (noise and speaker bleed removal, 16 kHz). Model: voxtype setup enhancer.
+    #[serde(default)]
+    pub enhance: bool,
+
     /// Maximum recording duration in seconds (safety limit)
     #[serde(default = "default_audio_max_duration_secs")]
     pub max_duration_secs: u32,
@@ -92,6 +97,7 @@ impl Default for AudioConfig {
         Self {
             device: default_audio_device(),
             sample_rate: default_audio_sample_rate(),
+            enhance: false,
             max_duration_secs: default_audio_max_duration_secs(),
             pause_media: false,
             pause_media_ignored_players: Vec::new(),
@@ -168,5 +174,21 @@ impl Default for AudioFeedbackConfig {
             theme: default_sound_theme(),
             volume: default_volume(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Config;
+
+    #[test]
+    fn test_audio_enhance() {
+        assert!(!Config::default().audio.enhance);
+        let config: Config = toml::from_str("[audio]").unwrap();
+        assert!(!config.audio.enhance);
+        let config: Config = toml::from_str("[audio]\nenhance = false").unwrap();
+        assert!(!config.audio.enhance);
+        let config: Config = toml::from_str("[audio]\nenhance = true").unwrap();
+        assert!(config.audio.enhance);
     }
 }
