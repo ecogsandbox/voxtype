@@ -41,10 +41,21 @@ enum Command {
 
 impl VoiceProcessingCapture {
     pub fn new(config: &AudioConfig) -> Result<Self, AudioError> {
+        let using_fallback = match default_output_transport() {
+            Ok(transport) if !use_voice_processing(transport) => {
+                tracing::info!("voice processing skipped: Bluetooth output device");
+                true
+            }
+            Ok(_) => false,
+            Err(error) => {
+                tracing::warn!(%error, "Could not check output transport; falling back to cpal");
+                true
+            }
+        };
         Ok(Self {
             config: config.clone(),
             fallback: CpalCapture::new(config)?,
-            using_fallback: false,
+            using_fallback,
             recording: false,
             startup_error: None,
             render_error: Arc::new(AtomicI32::new(0)),
@@ -85,7 +96,7 @@ impl AudioCapture for VoiceProcessingCapture {
     }
 
     async fn prepare(&mut self) {
-        if self.commands.is_some() || self.startup_error.is_some() {
+        if self.using_fallback || self.commands.is_some() || self.startup_error.is_some() {
             return;
         }
         let (commands_tx, commands_rx) = std::sync::mpsc::channel();
@@ -194,6 +205,41 @@ impl Drop for VoiceProcessingCapture {
     fn drop(&mut self) {
         self.join_worker();
     }
+}
+
+fn use_voice_processing(transport: u32) -> bool {
+    !matches!(
+        transport,
+        sys::kAudioDeviceTransportTypeBluetooth | sys::kAudioDeviceTransportTypeBluetoothLE
+    )
+}
+
+fn default_output_transport() -> Result<u32, String> {
+    let device = macos_helpers::get_default_device_id(false)
+        .filter(|id| *id != 0)
+        .ok_or_else(|| "No default output device".to_string())?;
+    let address = sys::AudioObjectPropertyAddress {
+        mSelector: sys::kAudioDevicePropertyTransportType,
+        mScope: sys::kAudioObjectPropertyScopeGlobal,
+        mElement: sys::kAudioObjectPropertyElementMain,
+    };
+    let mut transport = 0u32;
+    let mut size = std::mem::size_of_val(&transport) as u32;
+    // SAFETY: transport and size are writable and correctly sized for this property.
+    let status = unsafe {
+        sys::AudioObjectGetPropertyData(
+            device,
+            &address,
+            0,
+            std::ptr::null(),
+            &mut size,
+            (&mut transport as *mut u32).cast(),
+        )
+    };
+    if status != 0 {
+        return Err(format!("Could not read output transport (OSStatus {status})"));
+    }
+    Ok(transport)
 }
 
 /// Match cpal's selection precedence, while retaining the CoreAudio device ID.
@@ -309,6 +355,18 @@ fn initialize_unit(device: u32, error: Arc<AtomicI32>) -> Result<Session, String
         error,
     });
     let mut unit = AudioUnit::new(IOType::VoiceProcessingIO).map_err(|e| e.to_string())?;
+    let ducking = sys::AUVoiceIOOtherAudioDuckingConfiguration {
+        mEnableAdvancedDucking: false as sys::Boolean,
+        mDuckingLevel: sys::kAUVoiceIOOtherAudioDuckingLevelMin,
+    };
+    if let Err(error) = unit.set_property(
+        sys::kAUVoiceIOProperty_OtherAudioDuckingConfiguration,
+        Scope::Global,
+        Element::Output,
+        Some(&ducking),
+    ) {
+        tracing::warn!(%error, "Could not minimize VoiceProcessingIO audio ducking");
+    }
     let configure = |unit: &mut AudioUnit| -> Result<StreamFormat, coreaudio::Error> {
         // AudioUnit::new initializes immediately. Reconfigure uninitialized.
         unit.uninitialize()?;
@@ -529,6 +587,24 @@ fn stop_session(session: &mut Session) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_processing_skips_bluetooth_output() {
+        for transport in [
+            sys::kAudioDeviceTransportTypeBluetooth,
+            sys::kAudioDeviceTransportTypeBluetoothLE,
+        ] {
+            assert!(!use_voice_processing(transport));
+        }
+        for transport in [
+            sys::kAudioDeviceTransportTypeBuiltIn,
+            sys::kAudioDeviceTransportTypeUSB,
+            sys::kAudioDeviceTransportTypeVirtual,
+            sys::kAudioDeviceTransportTypeUnknown,
+        ] {
+            assert!(use_voice_processing(transport));
+        }
+    }
 
     #[test]
     fn render_failure_is_observable_and_stops_forwarding() {
