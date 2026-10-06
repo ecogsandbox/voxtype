@@ -40,6 +40,9 @@ pub trait AudioCapture: Send + Sync {
         None
     }
 
+    /// Allocate capture resources without starting microphone input.
+    async fn prepare(&mut self) {}
+
     /// Start capturing audio
     /// Returns a channel receiver for audio chunks (f32 samples, mono, 16kHz)
     async fn start(&mut self) -> Result<mpsc::Receiver<Vec<f32>>, AudioError>;
@@ -70,14 +73,17 @@ pub struct CaptureStatus {
     pub pid: u32,
     pub backend: String,
     pub active: bool,
+    #[serde(default)]
+    pub voice_processing: bool,
     pub error: Option<String>,
 }
 
-pub fn publish_capture_status(capture: &dyn AudioCapture) {
+pub fn publish_capture_status(capture: &dyn AudioCapture, active: bool) {
     write_capture_status(&CaptureStatus {
         pid: std::process::id(),
         backend: capture.backend_name().into(),
-        active: !capture.has_failed(),
+        active: active && !capture.has_failed(),
+        voice_processing: capture.backend_name() == "VoiceProcessingIO",
         error: capture.failure_reason(),
     });
 }

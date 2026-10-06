@@ -28,6 +28,7 @@ pub(crate) fn run_info_command(action: InfoAction, config: &Config) -> anyhow::R
                     status.backend,
                     if status.active { "active" } else { "stopped" }
                 );
+                println!("Voice processing: {}", status.voice_processing);
                 if let Some(error) = status.error {
                     println!("Capture fallback/error: {error}");
                 }

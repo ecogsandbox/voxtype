@@ -75,6 +75,16 @@ impl StreamResampler {
         })
     }
 
+    /// Clear filter history between recordings without rebuilding FFT plans.
+    pub fn reset(&mut self) {
+        if let Some(inner) = &mut self.inner {
+            inner.reset();
+        }
+        self.pending.clear();
+        self.frames_in = 0;
+        self.frames_out = 0;
+    }
+
     /// Convert as much of `samples` as forms whole chunks, returning the
     /// output produced. Leftover input is retained for the next call.
     pub fn push(&mut self, samples: &[f32]) -> Vec<f32> {
@@ -199,6 +209,20 @@ mod tests {
             im += s * phase.sin();
         }
         ((re * re + im * im).sqrt()) / samples.len() as f32
+    }
+
+    #[test]
+    fn reset_removes_previous_recording_and_filter_tail() {
+        for rate in [16_000, 44_100, 48_000] {
+            let mut resampler = StreamResampler::new(rate, 16_000).unwrap();
+            resampler.push(&vec![0.5; 1500]);
+            resampler.flush();
+            resampler.reset();
+            let mut silence = resampler.push(&vec![0.0; (rate / 10) as usize]);
+            silence.extend(resampler.flush());
+            assert_eq!(silence.len(), 1600);
+            assert!(silence.iter().all(|s| s.abs() < 1e-6));
+        }
     }
 
     /// The point of #641. A 12kHz tone sampled at 48kHz cannot be represented

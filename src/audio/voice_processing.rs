@@ -1,7 +1,7 @@
 //! macOS dictation capture with Apple's echo cancellation and noise suppression.
 //!
-//! The AudioUnit lives on a worker, like cpal's stream. Startup is acknowledged
-//! before returning the sample receiver, so every setup failure can use cpal.
+//! The daemon keeps an initialized, stopped AudioUnit on a worker. Recordings
+//! only start/stop I/O; setup and start failures can still use cpal.
 
 use super::{cpal_capture::CpalCapture, resampler::StreamResampler, AudioCapture};
 use crate::{config::AudioConfig, error::AudioError};
@@ -12,17 +12,17 @@ use coreaudio::audio_unit::{
 use coreaudio::sys;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::{thread, time::Duration};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 use tokio::sync::{mpsc, oneshot};
-
-// The factory creates a new capture for every recording. Remember a terminal
-// native failure across those instances, until the daemon is restarted.
-static NATIVE_FAILURE: AtomicI32 = AtomicI32::new(0);
 
 pub struct VoiceProcessingCapture {
     config: AudioConfig,
     fallback: CpalCapture,
     using_fallback: bool,
+    recording: bool,
     startup_error: Option<String>,
     render_error: Arc<AtomicI32>,
     commands: Option<std::sync::mpsc::Sender<Command>>,
@@ -30,7 +30,12 @@ pub struct VoiceProcessingCapture {
 }
 
 enum Command {
-    Stop(oneshot::Sender<Vec<f32>>),
+    Start(
+        mpsc::Sender<Vec<f32>>,
+        Instant,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    Stop(oneshot::Sender<Result<Vec<f32>, String>>),
     GetSamples(oneshot::Sender<Vec<f32>>),
 }
 
@@ -40,6 +45,7 @@ impl VoiceProcessingCapture {
             config: config.clone(),
             fallback: CpalCapture::new(config)?,
             using_fallback: false,
+            recording: false,
             startup_error: None,
             render_error: Arc::new(AtomicI32::new(0)),
             commands: None,
@@ -78,56 +84,90 @@ impl AudioCapture for VoiceProcessingCapture {
         }
     }
 
+    async fn prepare(&mut self) {
+        if self.commands.is_some() || self.startup_error.is_some() {
+            return;
+        }
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let device = self.config.device.clone();
+        let render_error = self.render_error.clone();
+        self.commands = Some(commands_tx);
+        self.worker = Some(thread::spawn(move || {
+            capture_worker(device, commands_rx, ready_tx, render_error);
+        }));
+        self.startup_error = match ready_rx.await {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(error) => Some(error.to_string()),
+        };
+        if self.startup_error.is_some() {
+            self.join_worker();
+            self.using_fallback = true;
+            tracing::warn!(error = ?self.startup_error, "VoiceProcessingIO unavailable; falling back to cpal");
+        }
+    }
+
     async fn start(&mut self) -> Result<mpsc::Receiver<Vec<f32>>, AudioError> {
-        if self.commands.is_some() || self.using_fallback {
+        let started = Instant::now();
+        if self.recording {
             return Err(AudioError::StreamError("Capture already started".into()));
         }
-        self.render_error.store(0, Ordering::Release);
-        self.startup_error = None;
-        let previous_failure = NATIVE_FAILURE.load(Ordering::Acquire);
-        if previous_failure != 0 {
-            self.startup_error = Some(format!(
-                "VoiceProcessingIO previously failed (OSStatus {previous_failure}); using cpal until restart"
-            ));
-        } else {
-            let (chunks_tx, chunks_rx) = mpsc::channel(64);
-            let (commands_tx, commands_rx) = std::sync::mpsc::channel();
-            let (ready_tx, ready_rx) = oneshot::channel();
-            let device = self.config.device.clone();
-            let render_error = self.render_error.clone();
-            self.commands = Some(commands_tx);
-            self.worker = Some(thread::spawn(move || {
-                capture_worker(device, chunks_tx, commands_rx, ready_tx, render_error);
-            }));
-            match ready_rx.await {
-                Ok(Ok(())) => return Ok(chunks_rx),
-                Ok(Err(error)) => self.startup_error = Some(error),
-                Err(error) => self.startup_error = Some(error.to_string()),
-            }
-            self.join_worker();
+        self.prepare().await;
+        if self.render_error.load(Ordering::Acquire) != 0 {
+            self.using_fallback = true;
         }
-        tracing::warn!(error = ?self.startup_error, "VoiceProcessingIO unavailable; falling back to cpal");
+        if !self.using_fallback {
+            let (chunks_tx, chunks_rx) = mpsc::channel(64);
+            let (tx, rx) = oneshot::channel();
+            let result = match &self.commands {
+                Some(commands) if commands.send(Command::Start(chunks_tx, started, tx)).is_ok() => {
+                    rx.await.unwrap_or_else(|e| Err(e.to_string()))
+                }
+                _ => Err("VoiceProcessingIO worker unavailable".into()),
+            };
+            match result {
+                Ok(()) => {
+                    self.recording = true;
+                    return Ok(chunks_rx);
+                }
+                Err(error) => {
+                    self.join_worker();
+                    self.startup_error = Some(error);
+                    self.using_fallback = true;
+                    tracing::warn!(error = ?self.startup_error, "VoiceProcessingIO start failed; falling back to cpal");
+                }
+            }
+        }
         let receiver = self.fallback.start().await?;
-        self.using_fallback = true;
+        self.recording = true;
         Ok(receiver)
     }
 
     async fn stop(&mut self) -> Result<Vec<f32>, AudioError> {
+        self.recording = false;
         if self.using_fallback {
-            self.using_fallback = false;
             return self.fallback.stop().await;
         }
         let mut samples = Vec::new();
-        if let Some(commands) = self.commands.take() {
+        if let Some(commands) = &self.commands {
             let (tx, rx) = oneshot::channel();
             if commands.send(Command::Stop(tx)).is_ok() {
-                samples = rx.await.map_err(|e| AudioError::StreamError(e.to_string()))?;
+                let result = rx.await.unwrap_or_else(|e| Err(e.to_string()));
+                match result {
+                    Ok(recorded) => samples = recorded,
+                    Err(error) => {
+                        self.join_worker();
+                        self.startup_error = Some(error.clone());
+                        self.using_fallback = true;
+                        return Err(AudioError::StreamError(error));
+                    }
+                }
             }
         }
-        self.join_worker();
         if self.has_failed() {
             // A user stop can race the daemon's failure poll.
-            super::publish_capture_status(self);
+            super::publish_capture_status(self, false);
         }
         if samples.is_empty() {
             Err(AudioError::EmptyRecording)
@@ -206,6 +246,8 @@ fn client_format(rate: f64) -> Result<StreamFormat, String> {
 struct CaptureBuffer {
     samples: Vec<f32>,
     resampler: StreamResampler,
+    chunks: Option<mpsc::Sender<Vec<f32>>>,
+    started: Option<Instant>,
 }
 
 /// coreaudio-rs returns AudioUnitRender errors before invoking our typed input
@@ -251,23 +293,13 @@ struct Session {
     unit: AudioUnit,
     _callback: Box<CheckedCallback>,
     buffer: Arc<Mutex<CaptureBuffer>>,
+    running: bool,
 }
 
-fn start_unit(
-    device: u32,
-    output_enabled: bool,
-    chunks: mpsc::Sender<Vec<f32>>,
-    error: Arc<AtomicI32>,
-) -> Result<Session, String> {
-    let output_device = if output_enabled {
-        Some(
-            macos_helpers::get_default_device_id(false)
-                .filter(|id| *id != 0)
-                .ok_or_else(|| "No default output device for voice processing".to_string())?,
-        )
-    } else {
-        None
-    };
+fn initialize_unit(device: u32, error: Arc<AtomicI32>) -> Result<Session, String> {
+    let output_device = macos_helpers::get_default_device_id(false)
+        .filter(|id| *id != 0)
+        .ok_or_else(|| "No default output device for voice processing".to_string())?;
     // Keep callback storage alive on all error paths, including start failure.
     let mut callback = Box::new(CheckedCallback {
         inner: sys::AURenderCallbackStruct {
@@ -290,7 +322,7 @@ fn start_unit(
             sys::kAudioOutputUnitProperty_EnableIO,
             Scope::Output,
             Element::Output,
-            Some(&u32::from(output_enabled)),
+            Some(&1u32),
         )?;
         unit.set_property(
             sys::kAudioOutputUnitProperty_CurrentDevice,
@@ -298,14 +330,13 @@ fn start_unit(
             Element::Input,
             Some(&device),
         )?;
-        if let Some(output_device) = output_device {
-            unit.set_property(
-                sys::kAudioOutputUnitProperty_CurrentDevice,
-                Scope::Global,
-                Element::Output,
-                Some(&output_device),
-            )?;
-        }
+        // VoiceProcessingIO requires output enabled on macOS, even for capture.
+        unit.set_property(
+            sys::kAudioOutputUnitProperty_CurrentDevice,
+            Scope::Global,
+            Element::Output,
+            Some(&output_device),
+        )?;
         let hardware = unit.get_property(
             sys::kAudioUnitProperty_StreamFormat,
             Scope::Input,
@@ -322,25 +353,25 @@ fn start_unit(
         Some(&format.to_asbd()),
     )
     .map_err(|e| e.to_string())?;
-    if output_enabled {
-        unit.set_property(
-            sys::kAudioUnitProperty_StreamFormat,
-            Scope::Input,
-            Element::Output,
-            Some(&format.to_asbd()),
-        )
-        .map_err(|e| e.to_string())?;
-        unit.set_render_callback(
-            |args: render_callback::Args<render_callback::data::Interleaved<f32>>| {
-                args.data.buffer.fill(0.0);
-                Ok(())
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    }
+    unit.set_property(
+        sys::kAudioUnitProperty_StreamFormat,
+        Scope::Input,
+        Element::Output,
+        Some(&format.to_asbd()),
+    )
+    .map_err(|e| e.to_string())?;
+    unit.set_render_callback(
+        |args: render_callback::Args<render_callback::data::Interleaved<f32>>| {
+            args.data.buffer.fill(0.0);
+            Ok(())
+        },
+    )
+    .map_err(|e| e.to_string())?;
     let buffer = Arc::new(Mutex::new(CaptureBuffer {
         samples: Vec::new(),
         resampler: StreamResampler::new(format.sample_rate as u32, 16_000)?,
+        chunks: None,
+        started: None,
     }));
     let callback_buffer = buffer.clone();
     unit.set_input_callback(
@@ -348,7 +379,18 @@ fn start_unit(
             let mut buffer = callback_buffer.lock().map_err(|_| ())?;
             let converted = buffer.resampler.push(args.data.buffer);
             buffer.samples.extend_from_slice(&converted);
-            let _ = chunks.try_send(converted);
+            if !converted.is_empty() {
+                // The recording buffer is also a consumer when no level/stream tap exists.
+                if let Some(started) = buffer.started.take() {
+                    tracing::debug!(
+                        latency_ms = started.elapsed().as_secs_f64() * 1000.0,
+                        "VoiceProcessingIO start() to first delivered buffer"
+                    );
+                }
+                if let Some(chunks) = &buffer.chunks {
+                    let _ = chunks.try_send(converted);
+                }
+            }
             Ok(())
         },
     )
@@ -393,92 +435,95 @@ fn start_unit(
     {
         return Err("VoiceProcessingIO did not accept mono f32 client format".into());
     }
-    unit.start().map_err(|e| e.to_string())?;
+    // coreaudio-rs initialize() only allocates resources. Only start() calls
+    // AudioOutputUnitStart: this stopped unit does not run microphone input.
     tracing::info!(
         device,
         sample_rate = format.sample_rate,
-        output_enabled,
-        "VoiceProcessingIO started: mono f32, resampled to 16000 Hz"
+        output_enabled = true,
+        "VoiceProcessingIO initialized (stopped): mono f32, resampled to 16000 Hz"
     );
     Ok(Session {
         unit,
         _callback: callback,
         buffer,
+        running: false,
     })
 }
 
 fn capture_worker(
     device: String,
-    chunks: mpsc::Sender<Vec<f32>>,
     commands: std::sync::mpsc::Receiver<Command>,
     ready: oneshot::Sender<Result<(), String>>,
     error: Arc<AtomicI32>,
 ) {
-    let started = input_device(&device).and_then(|id| {
-        start_unit(id, false, chunks.clone(), error.clone()).or_else(|first| {
-            tracing::debug!(%first, "Retrying VoiceProcessingIO with silent output");
-            error.store(0, Ordering::Release);
-            start_unit(id, true, chunks, error.clone())
-                .map_err(|second| format!("input-only: {first}; silent output: {second}"))
-        })
-    });
-    let session = match started {
+    let mut session = match input_device(&device).and_then(|id| initialize_unit(id, error.clone())) {
         Ok(session) => session,
         Err(error) => {
             let _ = ready.send(Err(error));
             return;
         }
     };
-    let buffer = session.buffer.clone();
-    let mut session = Some(session);
     if ready.send(Ok(())).is_err() {
         return;
     }
     loop {
-        if error.load(Ordering::Acquire) != 0 && session.is_some() {
-            NATIVE_FAILURE.store(error.load(Ordering::Acquire), Ordering::Release);
-            tracing::warn!(
-                status = error.load(Ordering::Acquire),
-                "VoiceProcessingIO render failed; preserving audio and using cpal until restart"
-            );
-            stop_session(&mut session, &buffer);
-        }
-        match commands.recv_timeout(Duration::from_millis(20)) {
-            Ok(Command::Stop(reply)) => {
-                stop_session(&mut session, &buffer);
-                let _ = reply.send(std::mem::take(&mut buffer.lock().unwrap().samples));
+        if error.load(Ordering::Acquire) != 0 && session.running {
+            tracing::warn!(status = error.load(Ordering::Acquire),
+                "VoiceProcessingIO render failed; preserving audio and using cpal until restart");
+            if stop_session(&mut session).is_err() {
                 break;
             }
+        }
+        match commands.recv_timeout(Duration::from_millis(20)) {
+            Ok(Command::Start(chunks, started, reply)) => {
+                {
+                    let mut buffer = session.buffer.lock().unwrap();
+                    buffer.samples.clear();
+                    buffer.chunks = Some(chunks);
+                    buffer.started = Some(started);
+                }
+                let result = session.unit.start().map_err(|e| e.to_string());
+                session.running = result.is_ok();
+                let failed = result.is_err();
+                let _ = reply.send(result);
+                if failed {
+                    // Dispose on an unrecoverable start failure before cpal starts.
+                    break;
+                }
+            }
+            Ok(Command::Stop(reply)) => {
+                let result = stop_session(&mut session);
+                let failed = result.is_err();
+                let _ = reply.send(result.map(|()| {
+                    std::mem::take(&mut session.buffer.lock().unwrap().samples)
+                }));
+                if failed {
+                    break;
+                }
+            }
             Ok(Command::GetSamples(reply)) => {
-                let _ = reply.send(std::mem::take(&mut buffer.lock().unwrap().samples));
+                let _ = reply.send(std::mem::take(&mut session.buffer.lock().unwrap().samples));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    // Dispose before checking once more: a callback can fail while Stop or
-    // channel closure is being handled, after the loop's initial check.
-    stop_session(&mut session, &buffer);
-    let status = error.load(Ordering::Acquire);
-    if status != 0 {
-        NATIVE_FAILURE.store(status, Ordering::Release);
-        tracing::warn!(
-            status,
-            "VoiceProcessingIO recording ended early; using cpal until restart"
-        );
-    }
+    let _ = stop_session(&mut session);
 }
 
-fn stop_session(session: &mut Option<Session>, buffer: &Mutex<CaptureBuffer>) {
-    if let Some(mut session) = session.take() {
-        if let Err(error) = session.unit.stop() {
-            tracing::warn!(%error, "Could not stop VoiceProcessingIO cleanly");
-        }
-        drop(session);
-        let mut buffer = buffer.lock().unwrap();
+fn stop_session(session: &mut Session) -> Result<(), String> {
+    if session.running {
+        session.unit.stop().map_err(|e| e.to_string())?;
+        session.running = false;
+        let mut buffer = session.buffer.lock().unwrap();
         let tail = buffer.resampler.flush();
         buffer.samples.extend(tail);
+        buffer.resampler.reset();
+        buffer.chunks = None;
+        buffer.started = None;
     }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -826,6 +826,8 @@ pub struct Daemon {
     /// cleared) by `stop_active_recording` to decide whether to run
     /// `external_trigger_stop_command`.
     is_external_trigger: bool,
+    idle_capture: Option<Box<dyn AudioCapture>>,
+    capture_config: Option<(String, bool)>,
     /// Synthetic zero-level publisher that keeps the OSD visible while a
     /// streaming session is draining server-side after the mic stopped.
     /// Aborted in `end_streaming`.
@@ -995,6 +997,8 @@ impl Daemon {
             level_emitter_task: None,
             silence_tracker: None,
             is_external_trigger: false,
+            idle_capture: None,
+            capture_config: None,
             streaming_drain_pump: None,
             osd_supervisor_task: None,
             model_manager: None,
@@ -1149,6 +1153,35 @@ impl Daemon {
             })
     }
 
+    async fn take_capture(
+        &mut self,
+    ) -> std::result::Result<Box<dyn AudioCapture>, crate::error::AudioError> {
+        let key = (
+            self.config.audio.device.clone(),
+            self.config.audio.voice_processing,
+        );
+        if self.capture_config.as_ref() != Some(&key) {
+            // Dispose the stopped unit when the input device or backend changes.
+            self.idle_capture.take();
+            self.capture_config = Some(key);
+        }
+        let mut capture = match self.idle_capture.take() {
+            Some(capture) => capture,
+            None => audio::create_capture(&self.config.audio)?,
+        };
+        capture.prepare().await;
+        Ok(capture)
+    }
+
+    async fn stop_capture(
+        &mut self,
+        mut capture: Box<dyn AudioCapture>,
+    ) -> std::result::Result<Vec<f32>, crate::error::AudioError> {
+        let samples = capture.stop().await;
+        self.idle_capture = Some(capture);
+        samples
+    }
+
     /// Start a batch (non-streaming) audio capture. `track_silence` arms
     /// silence-based auto-stop when the session is external-trigger and the
     /// feature is configured (see `new_speech_tracker`) — pass `false` for
@@ -1166,10 +1199,10 @@ impl Daemon {
         // point every recording path passes through, so a cancel can only
         // ever apply to a recording that was live when it was issued (#606).
         cleanup_cancel_file();
-        match audio::create_capture(&self.config.audio) {
+        match self.take_capture().await {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
-                    audio::publish_capture_status(capture.as_ref());
+                    audio::publish_capture_status(capture.as_ref(), true);
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
@@ -1199,6 +1232,8 @@ impl Daemon {
                     Ok(capture)
                 }
                 Err(e) => {
+                    audio::publish_capture_status(capture.as_ref(), false);
+                    self.idle_capture = Some(capture);
                     tracing::error!("Failed to start audio: {}", e);
                     self.play_feedback(SoundEvent::Error);
                     Err(())
@@ -1300,9 +1335,8 @@ impl Daemon {
             Err(e) => {
                 tracing::error!("Failed to start streaming session: {}", e);
                 self.play_feedback(SoundEvent::Error);
-                // Drop the capture cleanly; ignore final samples.
-                let mut c = capture;
-                let _ = c.stop().await;
+                // Stop and retain the capture; ignore final samples.
+                let _ = self.stop_capture(capture).await;
                 return false;
             }
         };
@@ -1445,8 +1479,8 @@ impl Daemon {
             tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
 
             // Stop audio capture and get remaining samples
-            if let Some(mut capture) = audio_capture.take() {
-                if let Ok(final_samples) = capture.stop().await {
+            if let Some(capture) = audio_capture.take() {
+                if let Ok(final_samples) = self.stop_capture(capture).await {
                     if let State::EagerRecording {
                         accumulated_audio, ..
                     } = state
@@ -1536,8 +1570,8 @@ impl Daemon {
     async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
-        if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
+        if let Some(c) = audio_capture.take() {
+            let _ = self.stop_capture(c).await;
         }
         self.restore_recording_media();
     }
@@ -1550,8 +1584,8 @@ impl Daemon {
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
     ) {
-        if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
+        if let Some(c) = audio_capture.take() {
+            let _ = self.stop_capture(c).await;
         }
         self.restore_recording_media();
         if let Some(h) = streaming_handle.take() {
@@ -1655,8 +1689,8 @@ impl Daemon {
             h.task
         });
         self.cut_streaming_audio();
-        if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
+        if let Some(c) = audio_capture.take() {
+            let _ = self.stop_capture(c).await;
         }
         self.restore_recording_media();
         if let Some(task) = backend_task {
@@ -1713,10 +1747,10 @@ impl Daemon {
         track_silence: bool,
     ) -> std::result::Result<(Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>), ()>
     {
-        match audio::create_capture(&self.config.audio) {
+        match self.take_capture().await {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
-                    audio::publish_capture_status(capture.as_ref());
+                    audio::publish_capture_status(capture.as_ref(), true);
                     // Bounded; backed-up streaming backend drops chunks
                     // rather than back-pressuring the capture.
                     let (streaming_tx, streaming_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
@@ -1760,6 +1794,8 @@ impl Daemon {
                     Ok((capture, streaming_rx))
                 }
                 Err(e) => {
+                    audio::publish_capture_status(capture.as_ref(), false);
+                    self.idle_capture = Some(capture);
                     tracing::error!("Failed to start audio: {}", e);
                     self.play_feedback(SoundEvent::Error);
                     Err(())
@@ -2520,8 +2556,8 @@ impl Daemon {
 
         // Stop recording before waiting on model loading or doing any
         // transcription work, then restore media immediately.
-        if let Some(mut capture) = audio_capture.take() {
-            let stop_result = capture.stop().await;
+        if let Some(capture) = audio_capture.take() {
+            let stop_result = self.stop_capture(capture).await;
             self.restore_recording_media();
 
             self.play_feedback(SoundEvent::RecordingStop);
@@ -3353,6 +3389,15 @@ impl Daemon {
 
         self.model_manager = Some(model_manager);
 
+        // Prepare once before accepting recordings. Initialized I/O stays stopped.
+        match self.take_capture().await {
+            Ok(capture) => {
+                audio::publish_capture_status(capture.as_ref(), false);
+                self.idle_capture = Some(capture);
+            }
+            Err(error) => tracing::warn!(%error, "Could not prepare capture at startup"),
+        }
+
         // Start hotkey listener (if enabled)
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
@@ -3372,7 +3417,7 @@ impl Daemon {
         // Current state
         let mut state = State::Idle;
 
-        // Audio capture (created fresh for each recording)
+        // Active capture, returned to idle_capture after each recording.
         let mut audio_capture: Option<Box<dyn AudioCapture>> = None;
 
         // Recording timeout
@@ -3584,8 +3629,8 @@ impl Daemon {
                                 tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
 
                                 // Stop audio capture and get remaining samples
-                                if let Some(mut capture) = audio_capture.take() {
-                                    if let Ok(final_samples) = capture.stop().await {
+                                if let Some(capture) = audio_capture.take() {
+                                    if let Ok(final_samples) = self.stop_capture(capture).await {
                                         // Add final samples to accumulated audio
                                         if let State::EagerRecording { accumulated_audio, .. } = &mut state {
                                             accumulated_audio.extend(final_samples);
@@ -3778,8 +3823,8 @@ impl Daemon {
                                 tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
 
                                 // Stop audio capture and get remaining samples
-                                if let Some(mut capture) = audio_capture.take() {
-                                    if let Ok(final_samples) = capture.stop().await {
+                                if let Some(capture) = audio_capture.take() {
+                                    if let Ok(final_samples) = self.stop_capture(capture).await {
                                         if let State::EagerRecording { accumulated_audio, .. } = &mut state {
                                             accumulated_audio.extend(final_samples);
                                         }
@@ -3843,8 +3888,8 @@ impl Daemon {
                                 self.end_external_session(state.is_recording()).await;
 
                                 // Stop recording and discard audio
-                                if let Some(mut capture) = audio_capture.take() {
-                                    let _ = capture.stop().await;
+                                if let Some(capture) = audio_capture.take() {
+                                    let _ = self.stop_capture(capture).await;
                                 }
                                 self.restore_recording_media();
 
@@ -3915,8 +3960,8 @@ impl Daemon {
                         tracing::info!("Recording cancelled");
 
                         // Stop recording and discard audio
-                        if let Some(mut capture) = audio_capture.take() {
-                            let _ = capture.stop().await;
+                        if let Some(capture) = audio_capture.take() {
+                            let _ = self.stop_capture(capture).await;
                         }
                         self.restore_recording_media();
 
@@ -4063,7 +4108,7 @@ impl Daemon {
                     // already captured. The next recording uses cpal.
                     if audio_capture.as_ref().is_some_and(|capture| capture.has_failed()) {
                         if let Some(capture) = audio_capture.as_ref() {
-                            audio::publish_capture_status(capture.as_ref());
+                            audio::publish_capture_status(capture.as_ref(), true);
                         }
                         self.stop_active_recording(
                             &mut state,
@@ -4118,8 +4163,8 @@ impl Daemon {
                         };
 
                         if state.is_eager_recording() {
-                            if let Some(mut capture) = audio_capture.take() {
-                                if let Ok(final_samples) = capture.stop().await {
+                            if let Some(capture) = audio_capture.take() {
+                                if let Ok(final_samples) = self.stop_capture(capture).await {
                                     if let State::EagerRecording { accumulated_audio, .. } = &mut state {
                                         accumulated_audio.extend(final_samples);
                                     }
@@ -4647,9 +4692,10 @@ impl Daemon {
             handle.task
         });
         self.cut_streaming_audio();
-        if let Some(mut capture) = audio_capture.take() {
-            let _ = capture.stop().await;
+        if let Some(capture) = audio_capture.take() {
+            let _ = self.stop_capture(capture).await;
         }
+        self.idle_capture.take();
         self.restore_recording_media();
         notification::close_persistent().await;
         if let Some(task) = streaming_task {
@@ -4741,6 +4787,51 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn stopped_capture_is_reused_until_device_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Capture(Arc<AtomicUsize>);
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        #[async_trait::async_trait]
+        impl AudioCapture for Capture {
+            async fn start(
+                &mut self,
+            ) -> std::result::Result<
+                tokio::sync::mpsc::Receiver<Vec<f32>>,
+                crate::error::AudioError,
+            > {
+                Ok(tokio::sync::mpsc::channel(1).1)
+            }
+            async fn stop(
+                &mut self,
+            ) -> std::result::Result<Vec<f32>, crate::error::AudioError> {
+                Err(crate::error::AudioError::EmptyRecording)
+            }
+            async fn get_samples(&mut self) -> Vec<f32> {
+                Vec::new()
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut daemon = Daemon::new(Config::default(), None);
+        daemon.capture_config = Some((daemon.config.audio.device.clone(), false));
+        daemon.idle_capture = Some(Box::new(Capture(drops.clone())));
+        for _ in 0..2 {
+            let mut capture = daemon.take_capture().await.unwrap();
+            capture.start().await.unwrap();
+            assert!(daemon.stop_capture(capture).await.is_err());
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+        }
+        daemon.config.audio.device = "another device".into();
+        let _replacement = daemon.take_capture().await.unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
 
     /// #643: the panic-recovery arm in handle_transcription_result must fire
     /// only for a real panic. Both JoinError flavors are constructed for real
