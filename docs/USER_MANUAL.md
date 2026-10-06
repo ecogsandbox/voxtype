@@ -500,6 +500,15 @@ on_recording_stop = false
 on_transcription = true
 ```
 
+### macOS dictation voice processing
+
+Set `[audio] voice_processing = true` to capture dictation with Apple's echo
+cancellation and noise suppression. The default is `false`. This enables the
+capturing process's Voice Isolation option in Control Center where supported;
+select the mic mode there. Check `voxtype info capture` for the observed backend
+and any fallback reason. See [configuration](CONFIGURATION.md#voice_processing)
+for device selection, fallback, and format details.
+
 ### Cloud Backend: Soniox
 
 For a cloud streaming alternative to the local engines above, voxtype supports [Soniox](https://soniox.com). Different trade-off space: paid SaaS, no local model, 60+ languages with strong Hungarian/EU coverage, sub-second partials at the cursor.

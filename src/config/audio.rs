@@ -18,6 +18,12 @@ pub struct AudioConfig {
     #[serde(default)]
     pub enhance: bool,
 
+    /// Capture through macOS voice processing (echo cancellation, noise suppression;
+    /// enables Voice Isolation in Control Center). Falls back to the standard input
+    /// if the audio unit cannot start. Ignored on other platforms.
+    #[serde(default)]
+    pub voice_processing: bool,
+
     /// Frozen voiceprint gate for batch dictation.
     #[serde(default)]
     pub speaker_filter: SpeakerFilterConfig,
@@ -102,6 +108,7 @@ impl Default for AudioConfig {
             device: default_audio_device(),
             sample_rate: default_audio_sample_rate(),
             enhance: false,
+            voice_processing: false,
             speaker_filter: SpeakerFilterConfig::default(),
             max_duration_secs: default_audio_max_duration_secs(),
             pause_media: false,
@@ -254,6 +261,20 @@ mod tests {
         filter.threshold = 0.5;
         filter.min_speech_secs = 1.0;
         assert!(filter.validate().is_err());
+    }
+
+    #[test]
+    fn test_voice_processing_config() {
+        assert!(!Config::default().audio.voice_processing);
+        for text in ["", "[audio]", "[audio]\nvoice_processing = false"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert!(!config.audio.voice_processing);
+        }
+        let config: Config = toml::from_str("[audio]\nvoice_processing = true").unwrap();
+        assert!(config.audio.voice_processing);
+        let roundtrip: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert!(roundtrip.audio.voice_processing);
+        assert!(toml::from_str::<Config>("[audio]\nvoice_processing = 'true'").is_err());
     }
 
     #[test]

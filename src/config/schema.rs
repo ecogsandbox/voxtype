@@ -802,6 +802,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     ),
     // -- Audio --------------------------------------------------------------
     spec(
+        "audio.voice_processing",
+        "audio",
+        "voice_processing",
+        KeyType::Bool,
+        "Audio",
+        "macOS voice processing",
+        "Capture through macOS voice processing (echo cancellation, noise suppression; enables Voice Isolation in Control Center). Falls back to the standard input if the audio unit cannot start. Ignored elsewhere.",
+    ),
+    spec(
         "audio.enhance",
         "audio",
         "enhance",
@@ -1828,6 +1837,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "audio.speaker_filter.min_speech_secs" => {
             json!(cfg.audio.speaker_filter.min_speech_secs)
         }
+        "audio.voice_processing" => json!(cfg.audio.voice_processing),
         "audio.enhance" => json!(cfg.audio.enhance),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
         "audio.pause_media" => json!(cfg.audio.pause_media),

@@ -188,6 +188,9 @@ impl AudioCapture for CpalCapture {
         let (chunk_tx, chunk_rx) = mpsc::channel(64);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CaptureCommand>();
 
+        // Acknowledge startup so callers can report the actual capture backend.
+        let (ready_tx, ready_rx) = oneshot::channel();
+
         // Shared state
         let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
         let samples_clone = samples.clone();
@@ -254,7 +257,9 @@ impl AudioCapture for CpalCapture {
                     build_stream::<u16>(&device, &stream_config, make_params(), err_fn)
                 }
                 format => {
-                    tracing::error!("Unsupported sample format: {:?}", format);
+                    let _ = ready_tx.send(Err(AudioError::StreamError(format!(
+                        "Unsupported sample format: {format:?}"
+                    ))));
                     return;
                 }
             };
@@ -262,16 +267,19 @@ impl AudioCapture for CpalCapture {
             let stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!("Failed to build audio stream: {}", e);
+                    let _ = ready_tx.send(Err(e));
                     return;
                 }
             };
 
             if let Err(e) = stream.play() {
-                tracing::error!("Failed to start audio stream: {}", e);
+                let _ = ready_tx.send(Err(AudioError::StreamError(e.to_string())));
                 return;
             }
 
+            if ready_tx.send(Ok(())).is_err() {
+                return;
+            }
             tracing::debug!("Audio capture thread started");
 
             // Handle commands in a loop
@@ -341,7 +349,20 @@ impl AudioCapture for CpalCapture {
         self.cmd_tx = Some(cmd_tx);
         self.thread_handle = Some(thread_handle);
 
-        Ok(chunk_rx)
+        match ready_rx.await {
+            Ok(Ok(())) => Ok(chunk_rx),
+            result => {
+                self.cmd_tx.take();
+                if let Some(handle) = self.thread_handle.take() {
+                    let _ = handle.join();
+                }
+                Err(match result {
+                    Ok(Err(error)) => error,
+                    Err(error) => AudioError::StreamError(error.to_string()),
+                    Ok(Ok(())) => unreachable!(),
+                })
+            }
+        }
     }
 
     async fn stop(&mut self) -> Result<Vec<f32>, AudioError> {

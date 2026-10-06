@@ -1098,6 +1098,7 @@ impl Daemon {
     /// and text output may continue after this point without keeping playback
     /// paused or ducked.
     fn restore_recording_media(&mut self) {
+        audio::mark_capture_stopped();
         self.restore_ducked_media_streams();
         self.resume_media_players();
     }
@@ -1168,6 +1169,7 @@ impl Daemon {
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
+                    audio::publish_capture_status(capture.as_ref());
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
@@ -1714,6 +1716,7 @@ impl Daemon {
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
+                    audio::publish_capture_status(capture.as_ref());
                     // Bounded; backed-up streaming backend drops chunks
                     // rather than back-pressuring the capture.
                     let (streaming_tx, streaming_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
@@ -4054,6 +4057,22 @@ impl Daemon {
                                 }
                             }
                         }
+                    }
+
+                    // A failed native render ends this session with the audio
+                    // already captured. The next recording uses cpal.
+                    if audio_capture.as_ref().is_some_and(|capture| capture.has_failed()) {
+                        if let Some(capture) = audio_capture.as_ref() {
+                            audio::publish_capture_status(capture.as_ref());
+                        }
+                        self.stop_active_recording(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        ).await;
+                        continue;
                     }
 
                     // Check for recording timeout. Skip when audio_capture is

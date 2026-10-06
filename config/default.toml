@@ -58,6 +58,11 @@ modifiers = []
 # or PipeWire source name -- names from `pactl list sources` will not work.
 device = "default"
 
+# Capture through macOS voice processing (echo cancellation, noise suppression;
+# enables Voice Isolation in Control Center). Falls back to the standard input
+# if the audio unit cannot start. macOS only; ignored elsewhere.
+voice_processing = false
+
 # Sample rate in Hz (whisper expects 16000)
 sample_rate = 16000
 

@@ -18,6 +18,23 @@ use voxtype::{setup, InfoAction};
 /// than re-reading the default path.
 pub(crate) fn run_info_command(action: InfoAction, config: &Config) -> anyhow::Result<()> {
     match action {
+        InfoAction::Capture { json } => {
+            let status = voxtype::audio::capture_status();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else if let Some(status) = status {
+                println!(
+                    "Capture backend: {} ({})",
+                    status.backend,
+                    if status.active { "active" } else { "stopped" }
+                );
+                if let Some(error) = status.error {
+                    println!("Capture fallback/error: {error}");
+                }
+            } else {
+                println!("Capture backend: unknown (no observation from a running daemon)");
+            }
+        }
         InfoAction::Variants { json } => {
             let inv = setup::binary::inventory();
             if json {

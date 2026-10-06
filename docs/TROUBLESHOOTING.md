@@ -239,6 +239,18 @@ systemctl --user status ydotool
 
 ## Audio Problems
 
+### macOS voice processing falls back to cpal
+
+With `[audio] voice_processing = true`, `voxtype info capture --json` reports the
+observed backend and any error. Startup failure uses cpal for that recording.
+A render failure preserves captured samples, ends the recording, and uses cpal
+until the daemon restarts. Check the warning for the CoreAudio error and confirm
+`audio.device` matches an input listed by `voxtype info devices`.
+
+Live Voice Isolation availability depends on macOS and the capturing process.
+The switch enables voice-processing capture; it does not select a mic mode in
+Control Center. Bluetooth microphones can change audio profiles when activated.
+
 ### "No audio captured" or empty transcriptions
 
 **Possible causes and solutions:**

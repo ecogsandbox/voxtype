@@ -4,6 +4,13 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum InfoAction {
+    /// Report the running daemon's active or last dictation capture backend
+    Capture {
+        /// Emit machine-readable JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show installed binary variants and which one is active
     Variants {
         /// Emit machine-readable JSON instead of human-readable text

@@ -372,6 +372,31 @@ Audio sample rate in Hz. Whisper expects 16000 Hz; other rates will be resampled
 sample_rate = 16000
 ```
 
+### voice_processing
+
+**Type:** boolean. **Default:** `false`. macOS only; ignored elsewhere.
+
+Capture through macOS voice processing (echo cancellation, noise suppression; enables Voice Isolation in Control Center). Falls back to the standard input if the audio unit cannot start.
+
+```toml
+[audio]
+voice_processing = false
+```
+
+Uses the configured input device and Apple's default automatic gain control.
+Capture requests mono f32 at the unit's hardware rate, then resamples to 16 kHz.
+Output is disabled when supported; otherwise the unit runs with silent output.
+Startup failures log a warning and use cpal for that recording. A render failure
+ends the recording with the samples already captured and selects cpal for
+subsequent recordings until the daemon restarts.
+
+`voxtype info capture` (or `--json`) reports the observed active or last capture
+backend and any fallback reason. The daemon publishes this in `capture.json`
+beside its existing runtime state file. Before the first recording, the backend
+is unknown. Voice Isolation availability and selection depend on macOS and the
+capturing process; this setting does not select the Control Center mic mode.
+Meeting capture is unaffected.
+
 ### enhance
 
 **Type:** Boolean
