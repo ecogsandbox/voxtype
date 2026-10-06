@@ -866,6 +866,8 @@ pub struct Daemon {
     )>,
     // Voice Activity Detection (filters silence-only recordings)
     vad: Option<Box<dyn crate::vad::VoiceActivityDetector>>,
+    // Frozen speaker gate, loaded once and shared with blocking inference tasks.
+    speaker_filter: Option<Arc<audio::speaker::SpeakerFilter>>,
     // Meeting mode daemon (optional, created when meeting starts)
     meeting_daemon: Option<MeetingDaemon>,
     // Meeting state file path
@@ -970,6 +972,9 @@ impl Daemon {
             tracing::warn!("Speech enhancement requires a build with ONNX support, continuing without");
         }
 
+        let speaker_filter =
+            audio::speaker::SpeakerFilter::load(&config.audio.speaker_filter).map(Arc::new);
+
         // Meeting state file path (separate from push-to-talk state)
         let meeting_state_file_path = if state_file_path.is_some() {
             Some(Config::runtime_dir().join("meeting_state"))
@@ -1000,6 +1005,7 @@ impl Daemon {
             transcriber_preloaded: None,
             eager_chunk_tasks: Vec::new(),
             vad,
+            speaker_filter,
             meeting_daemon: None,
             meeting_state_file_path,
             meeting_audio_capture: None,
@@ -2556,6 +2562,7 @@ impl Daemon {
                         return false;
                     }
 
+                    let mut speech_regions = vec![0..samples.len()];
                     // Voice Activity Detection: skip if no speech detected
                     if let Some(ref vad) = self.vad {
                         match vad.detect(&samples) {
@@ -2571,6 +2578,7 @@ impl Daemon {
                                 return false;
                             }
                             Ok(result) => {
+                                speech_regions = result.speech_regions;
                                 tracing::debug!(
                                     "Speech detected: {:.2}s ({:.1}%)",
                                     result.speech_duration_secs,
@@ -2583,6 +2591,29 @@ impl Daemon {
                             }
                         }
                     }
+
+                    let samples = if let Some(filter) = self.speaker_filter.clone() {
+                        match tokio::task::spawn_blocking(move || {
+                            filter.filter(&samples, &speech_regions)
+                        })
+                        .await
+                        {
+                            Ok(Ok(filtered)) if !filtered.is_empty() => filtered,
+                            outcome => {
+                                match outcome {
+                                    Ok(Err(e)) => tracing::warn!("speaker filter failed: {:#}", e),
+                                    Err(e) => tracing::error!("Speaker filter task failed: {}", e),
+                                    _ => {}
+                                }
+                                self.publish_empty_outcome();
+                                self.reset_to_idle(state).await;
+                                return false;
+                            }
+                        }
+                    } else {
+                        samples
+                    };
+                    let audio_duration = samples.len() as f32 / 16000.0;
 
                     tracing::info!("Transcribing {:.1}s of audio...", audio_duration);
                     *state = State::Transcribing {

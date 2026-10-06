@@ -13,7 +13,7 @@ mod record;
 mod root;
 mod setup;
 
-pub use commands::Commands;
+pub use commands::{Commands, VoiceprintAction};
 pub use config::ConfigAction;
 pub use info::InfoAction;
 pub use meeting::MeetingAction;

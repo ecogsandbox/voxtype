@@ -12,6 +12,7 @@ pub mod feedback;
 pub mod levels;
 pub mod media;
 pub mod resampler;
+pub mod speaker;
 
 pub use dual_capture::{AudioSourceType, DualCapture, DualSamples, SourcedSample};
 

@@ -89,6 +89,15 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("  enhance = {}", config.audio.enhance);
     println!("  max_duration_secs = {}", config.audio.max_duration_secs);
 
+    println!("\n[audio.speaker_filter]");
+    println!("  enabled = {}", config.audio.speaker_filter.enabled);
+    println!("  voiceprint = {:?}", config.audio.speaker_filter.voiceprint);
+    println!("  threshold = {}", config.audio.speaker_filter.threshold);
+    println!(
+        "  min_speech_secs = {}",
+        config.audio.speaker_filter.min_speech_secs
+    );
+
     println!("\n[audio.feedback]");
     println!("  enabled = {}", config.audio.feedback.enabled);
     println!("  theme = {:?}", config.audio.feedback.theme);

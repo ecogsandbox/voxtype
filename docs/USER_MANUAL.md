@@ -2564,3 +2564,19 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [Waybar Integration](WAYBAR.md) - Status bar indicator setup
 - [Troubleshooting Guide](TROUBLESHOOTING.md) - Common issues and solutions
 - [FAQ](FAQ.md) - Frequently asked questions
+
+### Filter dictation by speaker
+
+Build with `ml-diarization`, then enroll at least 10 seconds of your own speech:
+
+```bash
+voxtype voiceprint enroll reading.wav --out voiceprint.json
+voxtype voiceprint test held-out.wav --voiceprint voiceprint.json
+```
+
+Set `[audio.speaker_filter] enabled = true` and `voiceprint` to that JSON path,
+then restart the daemon. Calibrate `threshold` with held-out recordings of yourself
+and other speakers. Short dictations bypass the gate; overlapping voices cannot be
+separated. The voiceprint stays frozen until you enroll again. See
+[Speaker filter configuration](CONFIGURATION.md#audiospeaker_filter) for defaults,
+windowing, file transcription overrides, and calibration guidance.

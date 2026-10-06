@@ -62,6 +62,7 @@ impl VoiceActivityDetector for EnergyVad {
     fn detect(&self, samples: &[f32]) -> Result<VadResult, VadError> {
         if samples.is_empty() {
             return Ok(VadResult {
+                speech_regions: Vec::new(),
                 has_speech: false,
                 speech_duration_secs: 0.0,
                 speech_ratio: 0.0,
@@ -74,17 +75,25 @@ impl VoiceActivityDetector for EnergyVad {
         const FRAME_SIZE: usize = SAMPLE_RATE * FRAME_MS / 1000; // 320 samples
 
         let mut speech_frames = 0usize;
+        let mut speech_regions: Vec<std::ops::Range<usize>> = Vec::new();
         let mut total_frames = 0usize;
         let mut total_energy = 0.0f32;
 
         // Process audio in frames
-        for frame in samples.chunks(FRAME_SIZE) {
+        for (index, frame) in samples.chunks(FRAME_SIZE).enumerate() {
             let rms = Self::calculate_rms(frame);
             total_energy += rms;
             total_frames += 1;
 
             if rms >= self.threshold {
                 speech_frames += 1;
+                let start = index * FRAME_SIZE;
+                let end = start + frame.len();
+                if let Some(last) = speech_regions.last_mut().filter(|r| r.end == start) {
+                    last.end = end;
+                } else {
+                    speech_regions.push(start..end);
+                }
             }
         }
 
@@ -94,7 +103,8 @@ impl VoiceActivityDetector for EnergyVad {
             0.0
         };
 
-        let speech_duration_secs = (speech_frames * FRAME_MS) as f32 / 1000.0;
+        let speech_duration_secs =
+            speech_regions.iter().map(|r| r.len()).sum::<usize>() as f32 / SAMPLE_RATE as f32;
         let speech_ratio = if total_frames > 0 {
             speech_frames as f32 / total_frames as f32
         } else {
@@ -117,6 +127,7 @@ impl VoiceActivityDetector for EnergyVad {
         );
 
         Ok(VadResult {
+            speech_regions,
             has_speech,
             speech_duration_secs,
             speech_ratio,
@@ -128,6 +139,17 @@ impl VoiceActivityDetector for EnergyVad {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speech_regions_preserve_gaps_and_partial_frame_length() {
+        let vad = EnergyVad::new(&VadConfig::default());
+        let mut samples = vec![0.5; 640];
+        samples.extend(vec![0.0; 320]);
+        samples.extend(vec![0.5; 321]);
+        let result = vad.detect(&samples).unwrap();
+        assert_eq!(result.speech_regions, vec![0..640, 960..1281]);
+        assert!((result.speech_duration_secs - 961.0 / 16000.0).abs() < 1e-6);
+    }
 
     #[test]
     fn test_energy_vad_creation() {

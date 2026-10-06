@@ -18,6 +18,10 @@ pub struct AudioConfig {
     #[serde(default)]
     pub enhance: bool,
 
+    /// Frozen voiceprint gate for batch dictation.
+    #[serde(default)]
+    pub speaker_filter: SpeakerFilterConfig,
+
     /// Maximum recording duration in seconds (safety limit)
     #[serde(default = "default_audio_max_duration_secs")]
     pub max_duration_secs: u32,
@@ -98,6 +102,7 @@ impl Default for AudioConfig {
             device: default_audio_device(),
             sample_rate: default_audio_sample_rate(),
             enhance: false,
+            speaker_filter: SpeakerFilterConfig::default(),
             max_duration_secs: default_audio_max_duration_secs(),
             pause_media: false,
             pause_media_ignored_players: Vec::new(),
@@ -110,6 +115,43 @@ impl Default for AudioConfig {
             ),
             external_trigger_stop_command: None,
         }
+    }
+}
+
+/// Speaker filtering uses a frozen ECAPA voiceprint, never online adaptation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SpeakerFilterConfig {
+    pub enabled: bool,
+    pub voiceprint: String,
+    /// Cosine similarity cutoff. Calibrate with `voxtype voiceprint test`.
+    pub threshold: f32,
+    /// Speech shorter than this bypasses the gate (at least 1.5 seconds).
+    pub min_speech_secs: f32,
+}
+
+impl Default for SpeakerFilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            voiceprint: String::new(),
+            threshold: 0.5,
+            min_speech_secs: 1.5,
+        }
+    }
+}
+
+impl SpeakerFilterConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.threshold.is_finite() && (-1.0..=1.0).contains(&self.threshold),
+            "audio.speaker_filter.threshold must be a finite cosine similarity between -1 and 1"
+        );
+        anyhow::ensure!(
+            self.min_speech_secs.is_finite() && self.min_speech_secs >= 1.5,
+            "audio.speaker_filter.min_speech_secs must be finite and at least 1.5"
+        );
+        Ok(())
     }
 }
 
@@ -180,6 +222,39 @@ impl Default for AudioFeedbackConfig {
 #[cfg(test)]
 mod tests {
     use crate::config::Config;
+
+    #[test]
+    fn test_speaker_filter_config() {
+        for text in ["", "[audio]", "[audio.speaker_filter]"] {
+            let config: Config = toml::from_str(text).unwrap();
+            let filter = config.audio.speaker_filter;
+            assert!(!filter.enabled);
+            assert_eq!(filter.voiceprint, "");
+            assert_eq!(filter.threshold, 0.5);
+            assert_eq!(filter.min_speech_secs, 1.5);
+        }
+        let config: Config = toml::from_str(
+            r#"
+            [audio.speaker_filter]
+            enabled = true
+            voiceprint = "/tmp/voice.json"
+            threshold = 0.72
+            min_speech_secs = 2.0
+        "#,
+        )
+        .unwrap();
+        let mut filter = config.audio.speaker_filter;
+        assert!(filter.enabled);
+        assert_eq!(filter.voiceprint, "/tmp/voice.json");
+        assert_eq!(filter.threshold, 0.72);
+        assert_eq!(filter.min_speech_secs, 2.0);
+        assert!(filter.validate().is_ok());
+        filter.threshold = f32::NAN;
+        assert!(filter.validate().is_err());
+        filter.threshold = 0.5;
+        filter.min_speech_secs = 1.0;
+        assert!(filter.validate().is_err());
+    }
 
     #[test]
     fn test_audio_enhance() {

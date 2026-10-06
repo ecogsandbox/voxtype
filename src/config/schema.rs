@@ -811,6 +811,45 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Run the GTCRN speech enhancer on dictation audio before transcription (noise and speaker bleed removal, 16 kHz). Model: voxtype setup enhancer.",
     ),
     spec(
+        "audio.speaker_filter.enabled",
+        "audio.speaker_filter",
+        "enabled",
+        KeyType::Bool,
+        "Audio",
+        "Speaker filter",
+        "Keep only the enrolled voice in batch dictation. Requires ml-diarization. Disabled by default.",
+    ),
+    spec(
+        "audio.speaker_filter.voiceprint",
+        "audio.speaker_filter",
+        "voiceprint",
+        KeyType::String,
+        "Audio",
+        "Voiceprint file",
+        "Path to frozen ECAPA JSON created by voxtype voiceprint enroll. Missing files disable the gate until restart.",
+    ),
+    spec(
+        "audio.speaker_filter.threshold",
+        "audio.speaker_filter",
+        "threshold",
+        KeyType::Float { min: -1.0, max: 1.0 },
+        "Audio",
+        "Speaker similarity cutoff",
+        "Minimum cosine similarity. Default 0.5 is a starting point; calibrate with voxtype voiceprint test.",
+    ),
+    spec(
+        "audio.speaker_filter.min_speech_secs",
+        "audio.speaker_filter",
+        "min_speech_secs",
+        KeyType::Float {
+            min: 1.5,
+            max: f32::MAX as f64,
+        },
+        "Audio",
+        "Minimum speech for speaker filtering",
+        "Bypass the speaker gate below this many seconds of VAD-positive speech. Default 1.5.",
+    ),
+    spec(
         "audio.device",
         "audio",
         "device",
@@ -1783,6 +1822,12 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
 
         "audio.device" => json!(cfg.audio.device),
+        "audio.speaker_filter.enabled" => json!(cfg.audio.speaker_filter.enabled),
+        "audio.speaker_filter.voiceprint" => json!(cfg.audio.speaker_filter.voiceprint),
+        "audio.speaker_filter.threshold" => json!(cfg.audio.speaker_filter.threshold),
+        "audio.speaker_filter.min_speech_secs" => {
+            json!(cfg.audio.speaker_filter.min_speech_secs)
+        }
         "audio.enhance" => json!(cfg.audio.enhance),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
         "audio.pause_media" => json!(cfg.audio.pause_media),

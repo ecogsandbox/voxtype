@@ -124,7 +124,12 @@ pub(crate) async fn dispatch(
             engine,
             enhance,
             no_enhance,
+            speaker_filter,
+            no_speaker_filter,
         } => {
+            if speaker_filter || no_speaker_filter {
+                config.audio.speaker_filter.enabled = speaker_filter;
+            }
             if enhance || no_enhance {
                 config.audio.enhance = enhance;
             }
@@ -143,6 +148,8 @@ pub(crate) async fn dispatch(
             }
             transcribe_file(&config, &file)?;
         }
+
+        Commands::Voiceprint { action } => super::voiceprint::run(&config, action)?,
 
         Commands::TranscribeWorker {
             model,

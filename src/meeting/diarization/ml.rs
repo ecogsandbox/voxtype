@@ -268,7 +268,8 @@ impl MlDiarizer {
             .lock()
             .map_err(|e| format!("Session lock poisoned: {}", e))?;
 
-        // Prepare input tensor: [batch=1, samples]
+        // ECAPA expects raw mono 16 kHz f32 waveform [1, N].
+        // Do not normalize the waveform or compute features here.
         let input_tensor = Tensor::<f32>::from_array(([1usize, samples.len()], samples.to_vec()))
             .map_err(|e| format!("Failed to create input tensor: {}", e))?;
 

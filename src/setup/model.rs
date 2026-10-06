@@ -2248,12 +2248,17 @@ pub fn ensure_gtcrn_model() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Shared ECAPA model location. Looking up the path never downloads a model.
+pub fn ecapa_model_path() -> std::path::PathBuf {
+    Config::models_dir().join(ECAPA_MODEL_FILENAME)
+}
+
 /// Ensure the ECAPA-TDNN speaker embedding model is downloaded.
 /// Returns the path to the model file if available, or None if download fails.
 /// Used by ML-based speaker diarization in meeting mode.
 pub fn ensure_ecapa_model() -> Option<std::path::PathBuf> {
     let models_dir = Config::models_dir();
-    let model_path = models_dir.join(ECAPA_MODEL_FILENAME);
+    let model_path = ecapa_model_path();
 
     if model_path.exists() {
         return Some(model_path);

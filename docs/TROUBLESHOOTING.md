@@ -1399,3 +1399,17 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 
 - **Something not working?** If Voxtype doesn't install cleanly, doesn't work on your system, or is buggy in any way, please [open an issue](https://github.com/peteonrails/voxtype/issues). I actively monitor and respond to issues.
 - **Like Voxtype?** I don't accept donations, but if you find it useful, a star on the [GitHub repository](https://github.com/peteonrails/voxtype) would mean a lot!
+
+### Speaker filter does not match your voice
+
+Run `voxtype voiceprint test recording.wav --voiceprint voiceprint.json` with the
+same enhancement and VAD settings used for enrollment. Compare held-out recordings
+of yourself and other speakers before adjusting `audio.speaker_filter.threshold`.
+The default 0.5 has not been calibrated for your microphone or voice.
+
+A missing or invalid voiceprint or ECAPA model logs `speaker filter disabled` once
+at startup. Enroll again and restart the daemon. The daemon never downloads ECAPA.
+Build with `ml-diarization` if the warning names that feature. An inference error
+skips the dictation. `speaker filter: no matching voice` means every window was
+below the threshold. Short speech bypasses the gate, while the existing VAD silence
+check can still suppress silence-only recordings.

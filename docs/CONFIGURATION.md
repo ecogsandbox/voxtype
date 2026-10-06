@@ -518,6 +518,76 @@ duck_media_fade_ms = 150
 
 ---
 
+## [audio.speaker_filter]
+
+Keep the enrolled voice in batch push-to-talk dictation and `voxtype transcribe`.
+Requires a build with `ml-diarization` (included by `scripts/build-macos.sh`).
+Eager, streaming and meeting transcription are unaffected.
+
+```toml
+[audio.speaker_filter]
+enabled = false
+voiceprint = ""              # Path to the enrolled JSON file
+threshold = 0.5               # Cosine similarity, -1.0 to 1.0
+min_speech_secs = 1.5          # Bypass below this speech duration, minimum 1.5
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `enabled` | Boolean | `false` | Enable the batch speaker gate. |
+| `voiceprint` | String | `""` | Path to a frozen ECAPA voiceprint. |
+| `threshold` | Float | `0.5` | Accept windows with cosine similarity at least this value. |
+| `min_speech_secs` | Float | `1.5` | Skip the gate for shorter speech, leaving the original buffer unchanged. |
+
+Enroll using clean recordings of only your voice. At least 10 seconds of speech
+are required across the input WAV files. Audio is mixed to mono and resampled to
+16 kHz with the existing resampler when needed. Enrollment and calibration honor
+`audio.enhance` and the configured VAD, just like batch dictation. Keep those
+settings and the microphone consistent when recording calibration clips.
+
+```bash
+voxtype voiceprint enroll reading.wav more-reading.wav --out voiceprint.json
+voxtype voiceprint test held-out-self.wav --voiceprint voiceprint.json
+voxtype voiceprint test other-speaker.wav --voiceprint voiceprint.json --threshold 0.6
+voxtype transcribe recording.wav --speaker-filter
+voxtype transcribe recording.wav --no-speaker-filter
+```
+
+Enrollment installs the ECAPA model via the existing model downloader if missing.
+The daemon and `transcribe` never download it. The daemon loads the model and
+voiceprint once at startup; restart after replacing the voiceprint. A missing or
+invalid voiceprint/model logs one warning and disables the gate for that run.
+Inference errors skip that dictation rather than typing unchecked speech.
+
+After enhancement, configured VAD regions are joined for embedding extraction.
+With VAD disabled, the whole clip counts as speech. Full 1.5 second windows slide
+by 0.5 seconds across this speech timeline. A final window ends at the last sample
+when needed, covering the partial hop. Each embedding is L2-normalized before
+averaging; the final mean is also L2-normalized. The small JSON file contains
+`{"model":"ecapa_tdnn","dim":N,"embedding":[...]}`. It never adapts during use.
+Re-enroll to change it.
+
+The gate keeps the union of samples covered by accepted windows, maps that
+coverage back to the original audio, and joins separate kept regions with 100 ms
+of silence. If none match, no transcription or typing occurs. The daemon returns
+to `idle` and logs `speaker filter: no matching voice`. Gate time is logged at debug
+level. The existing VAD silence check still applies to short recordings.
+
+**Calibrate the threshold.** The default `0.5` is a starting point, not a measured
+equal-error threshold. `voiceprint test` prints each window's similarity and the
+share meeting the threshold. Times refer to the speech timeline after removing
+silence. Compare held-out recordings of yourself and other speakers at several
+thresholds to measure false rejects and false accepts. Enrollment recordings alone
+cannot establish those rates. No calibrated threshold is claimed without those
+recordings.
+
+**Overlap limitation:** each window is kept or dropped whole. Simultaneous voices
+are not separated, and an accepted window can retain another person's speech.
+
+Environment overrides: `VOXTYPE_SPEAKER_FILTER`, `VOXTYPE_VOICEPRINT`,
+`VOXTYPE_SPEAKER_FILTER_THRESHOLD`, `VOXTYPE_SPEAKER_FILTER_MIN_SPEECH_SECS`.
+The transcribe enable/disable flags override the resolved configuration.
+
 ## [audio.feedback]
 
 Controls audio feedback sounds (beeps when recording starts/stops).

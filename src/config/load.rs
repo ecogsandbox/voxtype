@@ -120,6 +120,22 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
 
     // Audio
+    if let Ok(val) = std::env::var("VOXTYPE_SPEAKER_FILTER") {
+        config.audio.speaker_filter.enabled = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_VOICEPRINT") {
+        config.audio.speaker_filter.voiceprint = val;
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_SPEAKER_FILTER_THRESHOLD") {
+        if let Ok(n) = val.parse::<f32>() {
+            config.audio.speaker_filter.threshold = n;
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_SPEAKER_FILTER_MIN_SPEECH_SECS") {
+        if let Ok(n) = val.parse::<f32>() {
+            config.audio.speaker_filter.min_speech_secs = n;
+        }
+    }
     if let Ok(device) = std::env::var("VOXTYPE_AUDIO_DEVICE") {
         config.audio.device = device;
     }

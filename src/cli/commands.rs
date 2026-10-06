@@ -39,6 +39,20 @@ pub enum Commands {
         /// Disable speech enhancement (overrides config)
         #[arg(long, conflicts_with = "enhance")]
         no_enhance: bool,
+
+        /// Keep only the enrolled voice in batch audio (overrides config)
+        #[arg(long, conflicts_with = "no_speaker_filter")]
+        speaker_filter: bool,
+
+        /// Disable the speaker filter (overrides config)
+        #[arg(long, conflicts_with = "speaker_filter")]
+        no_speaker_filter: bool,
+    },
+
+    /// Enroll a frozen voiceprint or measure speaker similarities (requires ml-diarization)
+    Voiceprint {
+        #[command(subcommand)]
+        action: VoiceprintAction,
     },
 
     /// Internal: Worker process for GPU-isolated transcription
@@ -179,4 +193,82 @@ pub enum Commands {
 
     /// Check for updates
     CheckUpdate,
+}
+
+/// Voiceprint enrollment and threshold calibration.
+#[derive(Subcommand)]
+pub enum VoiceprintAction {
+    /// Enroll from at least 10 seconds of speech in one or more WAV files
+    Enroll {
+        /// WAV recordings of your voice (converted to mono 16 kHz if needed)
+        #[arg(required = true, num_args = 1..)]
+        wav: Vec<std::path::PathBuf>,
+        /// Destination JSON voiceprint
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Print similarities per 1.5 s speech window and the share meeting the cutoff
+    Test {
+        /// WAV recording to measure
+        wav: std::path::PathBuf,
+        /// Enrolled JSON voiceprint
+        #[arg(long)]
+        voiceprint: std::path::PathBuf,
+        /// Cosine cutoff (defaults to audio.speaker_filter.threshold)
+        #[arg(long, allow_hyphen_values = true)]
+        threshold: Option<f32>,
+    },
+}
+
+#[cfg(test)]
+mod speaker_filter_tests {
+    use super::*;
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn voiceprint_enroll_accepts_multiple_files() {
+        let cli = Cli::try_parse_from([
+            "voxtype", "voiceprint", "enroll", "one.wav", "two.wav", "--out", "voice.json",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Commands::Voiceprint {
+                action: VoiceprintAction::Enroll { wav, out },
+            } => {
+                assert_eq!(wav.len(), 2);
+                assert_eq!(out, std::path::PathBuf::from("voice.json"));
+            }
+            _ => panic!("expected enrollment"),
+        }
+        assert!(Cli::try_parse_from([
+            "voxtype", "voiceprint", "enroll", "--out", "voice.json"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(["voxtype", "voiceprint", "test", "one.wav"]).is_err());
+    }
+
+    #[test]
+    fn transcribe_speaker_filter_flags() {
+        for (flag, expected) in [
+            ("--speaker-filter", (true, false)),
+            ("--no-speaker-filter", (false, true)),
+        ] {
+            let cli = Cli::try_parse_from(["voxtype", "transcribe", "one.wav", flag]).unwrap();
+            match cli.command.unwrap() {
+                Commands::Transcribe {
+                    speaker_filter,
+                    no_speaker_filter,
+                    ..
+                } => {
+                    assert_eq!((speaker_filter, no_speaker_filter), expected);
+                }
+                _ => panic!("expected transcribe"),
+            }
+        }
+        assert!(Cli::try_parse_from([
+            "voxtype", "transcribe", "one.wav", "--speaker-filter", "--no-speaker-filter",
+        ])
+        .is_err());
+    }
 }

@@ -68,7 +68,7 @@ impl VoiceActivityDetector for WhisperVad {
 
         // Calculate total speech duration from segments
         // Timestamps are in centiseconds (10ms units)
-        let mut total_speech_centiseconds = 0.0f32;
+        let mut speech_regions: Vec<std::ops::Range<usize>> = Vec::new();
         let num_segments = segments.num_segments();
 
         for i in 0..num_segments {
@@ -76,12 +76,21 @@ impl VoiceActivityDetector for WhisperVad {
                 segments.get_segment_start_timestamp(i),
                 segments.get_segment_end_timestamp(i),
             ) {
-                total_speech_centiseconds += end - start;
+                let start = ((start * 160.0) as usize).min(samples.len());
+                let end = ((end * 160.0) as usize).min(samples.len());
+                if start < end {
+                    if let Some(last) = speech_regions.last_mut().filter(|r| r.end >= start) {
+                        last.end = last.end.max(end);
+                    } else {
+                        speech_regions.push(start..end);
+                    }
+                }
             }
         }
 
-        // Convert centiseconds to seconds
-        let speech_duration_secs = total_speech_centiseconds / 100.0;
+        // Derive duration from the clamped, merged sample ranges.
+        let speech_duration_secs =
+            speech_regions.iter().map(|r| r.len()).sum::<usize>() as f32 / 16000.0;
 
         // Calculate total audio duration (samples at 16kHz)
         let total_duration_secs = samples.len() as f32 / 16000.0;
@@ -107,6 +116,7 @@ impl VoiceActivityDetector for WhisperVad {
         );
 
         Ok(VadResult {
+            speech_regions,
             has_speech,
             speech_duration_secs,
             speech_ratio,

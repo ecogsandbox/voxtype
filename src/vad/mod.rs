@@ -20,6 +20,8 @@ pub use whisper_vad::WhisperVad;
 /// Result of voice activity detection
 #[derive(Debug, Clone)]
 pub struct VadResult {
+    /// Speech regions in 16 kHz sample offsets, ordered and non-overlapping.
+    pub speech_regions: Vec<std::ops::Range<usize>>,
     /// Whether speech was detected in the audio
     pub has_speech: bool,
     /// Estimated duration of speech in seconds
@@ -128,6 +130,7 @@ mod tests {
     #[test]
     fn test_vad_result_defaults() {
         let result = VadResult {
+            speech_regions: Vec::new(),
             has_speech: false,
             speech_duration_secs: 0.0,
             speech_ratio: 0.0,
